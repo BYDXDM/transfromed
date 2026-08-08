@@ -382,6 +382,12 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
         }
     }
 
+    val webpSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let { treeUri ->
+            viewModel.saveOutputDir("webp", treeUri.toString())
+            startWebpConvert(treeUri)
+        }
+    }
     fun startWebpWithMemory() {
         // 有记住的目录直接用，否则弹选择器
         val last = viewModel.getOutputDir("webp")
@@ -392,13 +398,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
         }
     }
 
-    val webpSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { treeUri ->
-            viewModel.saveOutputDir("webp", treeUri.toString())
-            startWebpConvert(treeUri)
-        }
-    }
-val videoSaverMp4 = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("video/mp4")) { uri ->
+    val videoSaverMp4 = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("video/mp4")) { uri ->
         uri?.let {
             currentJob = coroutineScope.launch {
                 currentTaskName = "下载网络视频 (MP4)"
