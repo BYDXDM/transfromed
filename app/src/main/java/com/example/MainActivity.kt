@@ -205,140 +205,20 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
         if (uris.isNotEmpty()) webpUris = uris
     }
 
-    val epubSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { treeUri ->
-            viewModel.saveOutputDir("epub", treeUri.toString())  // 记住输出目录
-            currentJob = coroutineScope.launch {
-                currentTaskName = "批量转换 EPUB"
-                taskProgress = 0f
-                taskProgressText = "正在准备文件列表..."
-                var hasError = false
-                try {
-                    val total = epubUris.size
-                    for ((index, inputUri) in epubUris.withIndex()) {
-                        if (!isActive) break
-                        val fileName = getFileName(context, inputUri)
-                        val baseName = fileName.substringBeforeLast(".")
-                        val docDir = DocumentFile.fromTreeUri(context, treeUri)
-                        val docFile = docDir?.createFile("text/plain", "$baseName.txt")
-                        val fileBasePct = index.toFloat() / total
-                        val filePctRange = 1f / total
-
-                        taskProgress = fileBasePct
-                        taskProgressText = "转换第 ${index + 1}/$total 个: $fileName (0%)"
-
-                        if (docFile != null) {
-                            val success = doConversionWithRetry(context, inputUri, docFile.uri) { ctx, inUri, outUri ->
-                                convertEpubToTxt(
-                                    context = ctx, 
-                                    inputUri = inUri, 
-                                    outputUri = outUri,
-                                    onProgress = { pct, status ->
-                                        updateProgressOnMain(pct, "处理中 (${index + 1}/$total): $fileName (${(pct * 100).toInt()}%)")
-                                    },
-                                    basePct = fileBasePct,
-                                    pctRange = filePctRange,
-                                    taskLabel = "EPUB解析"
-                                )
-                            }
-                            viewModel.addHistory(fileName, "EPUB转TXT", success, if (success) docFile.uri.toString() else null)
-                            if (!success) hasError = true
-                        } else {
-                            hasError = true
-                        }
-                    }
-                    if (isActive) {
-                        taskProgress = 1.0f
-                        taskProgressText = "批量转换已全部完成 (100%)"
-                        if (hasError) {
-                            errorMessage = "批量转换 EPUB 时有文件转换失败达3次！"
-                            showErrorDialog = true
-                        } else {
-                            Toast.makeText(context, "批量保存成功！", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                } finally {
-                    epubUris = emptyList()
-                    currentJob = null
-                }
-            }
-        }
-    }
-
-    val mp4Saver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { treeUri ->
-            viewModel.saveOutputDir("mp4", treeUri.toString())  // 记住输出目录
-            currentJob = coroutineScope.launch {
-                currentTaskName = "批量转换 MP4"
-                taskProgress = 0f
-                taskProgressText = "正在准备媒体转换..."
-                var hasError = false
-                try {
-                    val total = mp4Uris.size
-                    for ((index, inputUri) in mp4Uris.withIndex()) {
-                        if (!isActive) break
-                        val fileName = getFileName(context, inputUri)
-                        val baseName = fileName.substringBeforeLast(".")
-                        val docDir = DocumentFile.fromTreeUri(context, treeUri)
-                        val docFile = docDir?.createFile("audio/mpeg", "$baseName.mp3")
-                        val fileBasePct = index.toFloat() / total
-                        val filePctRange = 1f / total
-
-                        taskProgress = fileBasePct
-                        taskProgressText = "提取第 ${index + 1}/$total 个音频: $fileName (0%)"
-
-                        if (docFile != null) {
-                            val success = doConversionWithRetry(context, inputUri, docFile.uri) { ctx, inUri, outUri ->
-                                convertMp4ToAudio(
-                                    context = ctx, 
-                                    inputUri = inUri, 
-                                    outputUri = outUri,
-                                    onProgress = { pct, status ->
-                                        updateProgressOnMain(pct, "音频提取 (${index + 1}/$total): $fileName (${(pct * 100).toInt()}%)")
-                                    },
-                                    basePct = fileBasePct,
-                                    pctRange = filePctRange,
-                                    taskLabel = "音频提取"
-                                )
-                            }
-                            viewModel.addHistory(fileName, "MP4转MP3", success, if (success) docFile.uri.toString() else null)
-                            if (!success) hasError = true
-                        } else {
-                            hasError = true
-                        }
-                    }
-                    if (isActive) {
-                        taskProgress = 1.0f
-                        taskProgressText = "批量提取已全部完成 (100%)"
-                        if (hasError) {
-                            errorMessage = "批量转换 MP4 时有文件转换失败达3次！"
-                            showErrorDialog = true
-                        } else {
-                            Toast.makeText(context, "批量保存成功！", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                } finally {
-                    mp4Uris = emptyList()
-                    currentJob = null
-                }
-            }
-        }
-    }
-
-        fun startWebpConvert(treeUri: Uri) {
+        fun startEpubConvert(treeUri: Uri) {
         currentJob = coroutineScope.launch {
-            currentTaskName = "批量转换 WebP"
+            currentTaskName = "批量转换 EPUB"
             taskProgress = 0f
             taskProgressText = "正在准备文件列表..."
             var hasError = false
             try {
-                val total = webpUris.size
-                for ((index, inputUri) in webpUris.withIndex()) {
+                val total = epubUris.size
+                for ((index, inputUri) in epubUris.withIndex()) {
                     if (!isActive) break
                     val fileName = getFileName(context, inputUri)
                     val baseName = fileName.substringBeforeLast(".")
                     val docDir = DocumentFile.fromTreeUri(context, treeUri)
-                    val docFile = docDir?.createFile("image/jpeg", "$baseName.jpg")
+                    val docFile = docDir?.createFile("text/plain", "$baseName.txt")
                     val fileBasePct = index.toFloat() / total
                     val filePctRange = 1f / total
 
@@ -347,19 +227,19 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
 
                     if (docFile != null) {
                         val success = doConversionWithRetry(context, inputUri, docFile.uri) { ctx, inUri, outUri ->
-                            convertWebpToJpg(
-                                context = ctx,
-                                inputUri = inUri,
+                            convertEpubToTxt(
+                                context = ctx, 
+                                inputUri = inUri, 
                                 outputUri = outUri,
                                 onProgress = { pct, status ->
                                     updateProgressOnMain(pct, "处理中 (${index + 1}/$total): $fileName (${(pct * 100).toInt()}%)")
                                 },
                                 basePct = fileBasePct,
                                 pctRange = filePctRange,
-                                taskLabel = "WebP转JPG"
+                                taskLabel = "EPUB解析"
                             )
                         }
-                        viewModel.addHistory(fileName, "WebP转JPG", success, if (success) docFile.uri.toString() else null)
+                        viewModel.addHistory(fileName, "EPUB转TXT", success, if (success) docFile.uri.toString() else null)
                         if (!success) hasError = true
                     } else {
                         hasError = true
@@ -369,20 +249,99 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     taskProgress = 1.0f
                     taskProgressText = "批量转换已全部完成 (100%)"
                     if (hasError) {
-                        errorMessage = "批量转换 WebP 时有文件转换失败达3次！"
+                        errorMessage = "批量转换 EPUB 时有文件转换失败达3次！"
                         showErrorDialog = true
                     } else {
                         Toast.makeText(context, "批量保存成功！", Toast.LENGTH_SHORT).show()
                     }
                 }
             } finally {
-                webpUris = emptyList()
+                epubUris = emptyList()
                 currentJob = null
             }
         }
     }
 
-    val webpSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+    val epubSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let { treeUri ->
+            viewModel.saveOutputDir("epub", treeUri.toString())
+            startEpubConvert(treeUri)
+        }
+    }
+    fun startEpubWithMemory() {
+        val last = viewModel.getOutputDir("epub")
+        if (last != null) startEpubConvert(android.net.Uri.parse(last))
+        else epubSaver.launch(null)
+    }
+    fun startMp4Convert(treeUri: Uri) {
+        currentJob = coroutineScope.launch {
+            currentTaskName = "批量转换 MP4"
+            taskProgress = 0f
+            taskProgressText = "正在准备媒体转换..."
+            var hasError = false
+            try {
+                val total = mp4Uris.size
+                for ((index, inputUri) in mp4Uris.withIndex()) {
+                    if (!isActive) break
+                    val fileName = getFileName(context, inputUri)
+                    val baseName = fileName.substringBeforeLast(".")
+                    val docDir = DocumentFile.fromTreeUri(context, treeUri)
+                    val docFile = docDir?.createFile("audio/mpeg", "$baseName.mp3")
+                    val fileBasePct = index.toFloat() / total
+                    val filePctRange = 1f / total
+
+                    taskProgress = fileBasePct
+                    taskProgressText = "提取第 ${index + 1}/$total 个音频: $fileName (0%)"
+
+                    if (docFile != null) {
+                        val success = doConversionWithRetry(context, inputUri, docFile.uri) { ctx, inUri, outUri ->
+                            convertMp4ToAudio(
+                                context = ctx, 
+                                inputUri = inUri, 
+                                outputUri = outUri,
+                                onProgress = { pct, status ->
+                                    updateProgressOnMain(pct, "音频提取 (${index + 1}/$total): $fileName (${(pct * 100).toInt()}%)")
+                                },
+                                basePct = fileBasePct,
+                                pctRange = filePctRange,
+                                taskLabel = "音频提取"
+                            )
+                        }
+                        viewModel.addHistory(fileName, "MP4转MP3", success, if (success) docFile.uri.toString() else null)
+                        if (!success) hasError = true
+                    } else {
+                        hasError = true
+                    }
+                }
+                if (isActive) {
+                    taskProgress = 1.0f
+                    taskProgressText = "批量提取已全部完成 (100%)"
+                    if (hasError) {
+                        errorMessage = "批量转换 MP4 时有文件转换失败达3次！"
+                        showErrorDialog = true
+                    } else {
+                        Toast.makeText(context, "批量保存成功！", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } finally {
+                mp4Uris = emptyList()
+                currentJob = null
+            }
+        }
+    }
+
+    val mp4Saver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let { treeUri ->
+            viewModel.saveOutputDir("mp4", treeUri.toString())
+            startMp4Convert(treeUri)
+        }
+    }
+    fun startMp4WithMemory() {
+        val last = viewModel.getOutputDir("mp4")
+        if (last != null) startMp4Convert(android.net.Uri.parse(last))
+        else mp4Saver.launch(null)
+    }
+val webpSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { treeUri ->
             viewModel.saveOutputDir("webp", treeUri.toString())
             startWebpConvert(treeUri)
@@ -962,11 +921,20 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     if (epubUris.isNotEmpty()) {
                         Text(getBatchFileSizeText(context, epubUris), style = MaterialTheme.typography.bodyMedium)
                     }
-                    Button(
-                        onClick = { epubSaver.launch(null) },
-                        enabled = epubUris.isNotEmpty() && !isConverting
-                    ) {
-                        Text("批量转换并保存为TXT")
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { startEpubWithMemory() },
+                            enabled = epubUris.isNotEmpty() && !isConverting,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(if (viewModel.getOutputDir("epub") != null) "转换到上次目录" else "选目录并转换")
+                        }
+                        OutlinedButton(
+                            onClick = { epubSaver.launch(null) },
+                            enabled = !isConverting
+                        ) {
+                            Text("换目录")
+                        }
                     }
                 }
             }
@@ -997,11 +965,20 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     if (mp4Uris.isNotEmpty()) {
                         Text(getBatchFileSizeText(context, mp4Uris), style = MaterialTheme.typography.bodyMedium)
                     }
-                    Button(
-                        onClick = { mp4Saver.launch(null) },
-                        enabled = mp4Uris.isNotEmpty() && !isConverting
-                    ) {
-                        Text("批量转换并保存为MP3")
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { startMp4WithMemory() },
+                            enabled = mp4Uris.isNotEmpty() && !isConverting,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(if (viewModel.getOutputDir("mp4") != null) "转换到上次目录" else "选目录并转换")
+                        }
+                        OutlinedButton(
+                            onClick = { mp4Saver.launch(null) },
+                            enabled = !isConverting
+                        ) {
+                            Text("换目录")
+                        }
                     }
                 }
             }
