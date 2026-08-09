@@ -205,7 +205,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
         if (uris.isNotEmpty()) webpUris = uris
     }
 
-        fun startEpubConvert(treeUri: Uri) {
+    fun startEpubConvert(treeUri: Uri) {
         currentJob = coroutineScope.launch {
             currentTaskName = "批量转换 EPUB"
             taskProgress = 0f
@@ -268,11 +268,13 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
             startEpubConvert(treeUri)
         }
     }
+
     fun startEpubWithMemory() {
         val last = viewModel.getOutputDir("epub")
         if (last != null) startEpubConvert(android.net.Uri.parse(last))
         else epubSaver.launch(null)
     }
+
     fun startMp4Convert(treeUri: Uri) {
         currentJob = coroutineScope.launch {
             currentTaskName = "批量转换 MP4"
@@ -336,12 +338,71 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
             startMp4Convert(treeUri)
         }
     }
+
     fun startMp4WithMemory() {
         val last = viewModel.getOutputDir("mp4")
         if (last != null) startMp4Convert(android.net.Uri.parse(last))
         else mp4Saver.launch(null)
     }
-val webpSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+
+    fun startWebpConvert(treeUri: Uri) {
+        currentJob = coroutineScope.launch {
+            currentTaskName = "批量转换 WebP"
+            taskProgress = 0f
+            taskProgressText = "正在准备文件列表..."
+            var hasError = false
+            try {
+                val total = webpUris.size
+                for ((index, inputUri) in webpUris.withIndex()) {
+                    if (!isActive) break
+                    val fileName = getFileName(context, inputUri)
+                    val baseName = fileName.substringBeforeLast(".")
+                    val docDir = DocumentFile.fromTreeUri(context, treeUri)
+                    val docFile = docDir?.createFile("image/jpeg", "$baseName.jpg")
+                    val fileBasePct = index.toFloat() / total
+                    val filePctRange = 1f / total
+
+                    taskProgress = fileBasePct
+                    taskProgressText = "转换第 ${index + 1}/$total 个: $fileName (0%)"
+
+                    if (docFile != null) {
+                        val success = doConversionWithRetry(context, inputUri, docFile.uri) { ctx, inUri, outUri ->
+                            convertWebpToJpg(
+                                context = ctx,
+                                inputUri = inUri,
+                                outputUri = outUri,
+                                onProgress = { pct, status ->
+                                    updateProgressOnMain(pct, "处理中 (${index + 1}/$total): $fileName (${(pct * 100).toInt()}%)")
+                                },
+                                basePct = fileBasePct,
+                                pctRange = filePctRange,
+                                taskLabel = "WebP转JPG"
+                            )
+                        }
+                        viewModel.addHistory(fileName, "WebP转JPG", success, if (success) docFile.uri.toString() else null)
+                        if (!success) hasError = true
+                    } else {
+                        hasError = true
+                    }
+                }
+                if (isActive) {
+                    taskProgress = 1.0f
+                    taskProgressText = "批量转换已全部完成 (100%)"
+                    if (hasError) {
+                        errorMessage = "批量转换 WebP 时有文件转换失败达3次！"
+                        showErrorDialog = true
+                    } else {
+                        Toast.makeText(context, "批量保存成功！", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } finally {
+                webpUris = emptyList()
+                currentJob = null
+            }
+        }
+    }
+
+    val webpSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { treeUri ->
             viewModel.saveOutputDir("webp", treeUri.toString())
             startWebpConvert(treeUri)
@@ -932,9 +993,7 @@ val webpSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDo
                         OutlinedButton(
                             onClick = { epubSaver.launch(null) },
                             enabled = !isConverting
-                        ) {
-                            Text("换目录")
-                        }
+                        ) { Text("换目录") }
                     }
                 }
             }
@@ -976,9 +1035,7 @@ val webpSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDo
                         OutlinedButton(
                             onClick = { mp4Saver.launch(null) },
                             enabled = !isConverting
-                        ) {
-                            Text("换目录")
-                        }
+                        ) { Text("换目录") }
                     }
                 }
             }
