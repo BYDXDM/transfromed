@@ -60,6 +60,7 @@ import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Title
@@ -117,6 +118,13 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     var fetchedVideoTitle by remember { mutableStateOf<String?>(null) }
     var isFetchingVideoTitle by remember { mutableStateOf(false) }
     var customVideoTitle by remember { mutableStateOf("") }
+
+    // 歌曲搜索下载状态
+    var songQuery by remember { mutableStateOf("") }
+    var songResults by remember { mutableStateOf<List<NetworkDownloader.SongResult>>(emptyList()) }
+    var isSongSearching by remember { mutableStateOf(false) }
+    var showSongResults by remember { mutableStateOf(false) }
+    var songToast by remember { mutableStateOf("") }
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -1094,6 +1102,95 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text("网络视频解析与下载 (B站 / X / YouTube)", style = MaterialTheme.typography.titleLarge)
+
+                    // ---- 歌曲搜索下载 ----
+                    OutlinedTextField(
+                        value = songQuery,
+                        onValueChange = { songQuery = it },
+                        label = { Text("🎵 歌曲搜索") },
+                        placeholder = { Text("输入歌手 / 歌名，如: 周杰伦 晴天") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        trailingIcon = {
+                            Row {
+                                if (songQuery.isNotEmpty()) {
+                                    IconButton(onClick = { songQuery = "" }) {
+                                        Icon(Icons.Default.Clear, contentDescription = "清空")
+                                    }
+                                }
+                                IconButton(
+                                    onClick = {
+                                        if (songQuery.isNotBlank() && !isSongSearching) {
+                                            coroutineScope.launch {
+                                                isSongSearching = true
+                                                try {
+                                                    val r = NetworkDownloader.searchYouTubeMusic(context, songQuery.trim())
+                                                    if (r.isNotEmpty()) {
+                                                        songResults = r
+                                                        showSongResults = true
+                                                    } else {
+                                                        songToast = "未搜到歌曲，请检查网络/代理或换歌名"
+                                                    }
+                                                } catch (e: Exception) {
+                                                    songToast = "搜索失败: ${e.message}"
+                                                } finally {
+                                                    isSongSearching = false
+                                                }
+                                            }
+                                        } else if (songQuery.isBlank()) {
+                                            songToast = "请输入歌名或歌手"
+                                        }
+                                    },
+                                    enabled = !isSongSearching
+                                ) {
+                                    if (isSongSearching) {
+                                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Search, contentDescription = "搜索歌曲")
+                                    }
+                                }
+                            }
+                        },
+                        supportingText = {
+                            Text(if (songToast.isNotEmpty()) songToast else "搜索来源 YouTube，国内网络需代理。搜索结果可点选直接下载 MP3")
+                        }
+                    )
+
+                    // 搜索结果选择对话框
+                    if (showSongResults) {
+                        AlertDialog(
+                            onDismissRequest = { showSongResults = false },
+                            title = { Text("选择要下载的歌曲") },
+                            text = {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    songResults.forEach { r ->
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth().clickable {
+                                                videoUrl = "https://www.youtube.com/watch?v=${r.videoId}"
+                                                customVideoTitle = r.title
+                                                fetchedVideoTitle = r.title
+                                                showSongResults = false
+                                                songToast = "已选择: ${r.title}，点击下方\"下载 MP3\""
+                                            },
+                                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                        ) {
+                                            Column(Modifier.padding(10.dp)) {
+                                                Text(r.title, fontWeight = FontWeight.Bold, maxLines = 2)
+                                                Text("${r.channel}   ${r.duration}", style = MaterialTheme.typography.bodySmall)
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(onClick = { showSongResults = false }) { Text("取消") }
+                            }
+                        )
+                    }
+
                     OutlinedTextField(
                         value = videoUrl,
                         onValueChange = { input ->
