@@ -261,6 +261,126 @@ object NetworkDownloader {
         }
     }
 
+             } catch (e: Exception) {
+                 null
+             }
+         }
+     }
+
+    // 歌曲搜索：从 YouTube 搜索返回结果列表（videoId, title...）
+    data class SongResult(
+        val videoId: String,
+        val title: String,
+        val channel: String,
+        val duration: String
+    )
+
+    suspend fun searchYouTubeMusic(context: Context, query: String, limit: Int = 5): List<SongResult> {
+        return withContext(Dispatchers.IO) {
+            if (query.isBlank()) return@withContext emptyList()
+            val results = mutableListOf<SongResult>()
+
+            // 方案 1: Piped 搜索 API (JSON, 简洁，复用现有第三方源)
+            try {
+                val searchUrl = "https://pipedapi.kavin.rocks/search?q=${java.net.URLEncoder.encode(query, "UTF-8")}&filter=videos"
+                val req = Request.Builder().url(searchUrl)
+                    .header("User-Agent", USER_AGENT).build()
+                client.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val json = JSONObject(res.body?.string() ?: "")
+                        val items = json.optJSONArray("items")
+                        if (items != null) {
+                            for (i in 0 until items.length()) {
+                                if (results.size >= limit) break
+                                val item = items.optJSONObject(i)
+                                val id = item?.optString("url")?.substringAfter("watch?v=")
+                                val title = item?.optString("title")
+                                if (!id.isNullOrBlank() && !title.isNullOrBlank()) {
+                                    results.add(SongResult(
+                                        videoId = id,
+                                        title = title,
+                                        channel = item?.optString("uploaderName") ?: "",
+                                        duration = item?.optString("duration") ?: ""
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                AppLogger.log(context, "【歌曲搜索-方案1】Piped 失败: ${e.message}")
+            }
+            if (results.isNotEmpty()) return@withContext results
+
+            // 方案 2: YouTube innertube 搜索 API
+            try {
+                val body = JSONObject().apply {
+                    put("query", query)
+                    put("context", JSONObject().apply {
+                        put("client", JSONObject().apply {
+                            put("clientName", "WEB")
+                            put("clientVersion", "2.20240701.00.00")
+                            put("hl", "zh-CN")
+                        })
+                    })
+                }
+                val req = Request.Builder()
+                    .url("https://www.youtube.com/youtubei/v1/search")
+                    .header("User-Agent", USER_AGENT)
+                    .header("Content-Type", "application/json")
+                    .post(RequestBody.create("application/json".toMediaType(), body.toString()))
+                    .build()
+                client.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val json = JSONObject(res.body?.string() ?: "")
+                        val contents = json.optJSONObject("contents")
+                            ?.optJSONObject("twoColumnSearchResultsRenderer")
+                            ?.optJSONObject("primaryContents")
+                            ?.optJSONObject("sectionListRenderer")
+                            ?.optJSONArray("contents")
+                        if (contents != null) {
+                            for (i in 0 until contents.length()) {
+                                if (results.size >= limit) break
+                                val itemSection = contents.optJSONObject(i)
+                                    ?.optJSONObject("itemSectionRenderer")
+                                    ?.optJSONArray("contents") ?: continue
+                                for (j in 0 until itemSection.length()) {
+                                    if (results.size >= limit) break
+                                    val videoRenderer = itemSection.optJSONObject(j)
+                                        ?.optJSONObject("videoRenderer") ?: continue
+                                    val id = videoRenderer.optString("videoId")
+                                    val title = videoRenderer.optJSONObject("title")
+                                        ?.optJSONArray("runs")
+                                        ?.optJSONObject(0)
+                                        ?.optString("text")
+                                    if (!id.isNullOrBlank() && !title.isNullOrBlank()) {
+                                        val lengthText = videoRenderer.optJSONObject("lengthText")
+                                            ?.optJSONArray("runs")
+                                            ?.optJSONObject(0)
+                                            ?.optString("text") ?: ""
+                                        val channel = videoRenderer.optJSONObject("ownerText")
+                                            ?.optJSONArray("runs")
+                                            ?.optJSONObject(0)
+                                            ?.optString("text") ?: ""
+                                        results.add(SongResult(
+                                            videoId = id,
+                                            title = title,
+                                            channel = channel,
+                                            duration = lengthText
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                AppLogger.log(context, "【歌曲搜索-方案2】innertube 失败: ${e.message}")
+            }
+            results
+        }
+    }
+
     suspend fun downloadVideo(
         context: Context, 
         url: String, 
