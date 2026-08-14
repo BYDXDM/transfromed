@@ -261,11 +261,6 @@ object NetworkDownloader {
         }
     }
 
-             } catch (e: Exception) {
-                 null
-             }
-         }
-     }
 
     // 歌曲搜索：从 YouTube 搜索返回结果列表（videoId, title...）
     data class SongResult(
