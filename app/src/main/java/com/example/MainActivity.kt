@@ -1124,12 +1124,19 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                             coroutineScope.launch {
                                                 isSongSearching = true
                                                 try {
-                                                    val r = NetworkDownloader.searchYouTubeMusic(context, songQuery.trim())
+                                                    // B站优先（国内直连、无需代理），搜不到再退回 YouTube
+                                                    var r = NetworkDownloader.searchBilibiliMusic(context, songQuery.trim(), 8)
+                                                    var usedSource = "B站"
+                                                    if (r.isEmpty()) {
+                                                        r = NetworkDownloader.searchYouTubeMusic(context, songQuery.trim(), 5)
+                                                        usedSource = "YouTube"
+                                                    }
                                                     if (r.isNotEmpty()) {
                                                         songResults = r
                                                         showSongResults = true
+                                                        songToast = "共 ${r.size} 个结果（来源: $usedSource），点选下载 MP3"
                                                     } else {
-                                                        songToast = "未搜到歌曲，请检查网络/代理或换歌名"
+                                                        songToast = "B站/YouTube 都未搜到歌曲，请换歌名或检查网络"
                                                     }
                                                 } catch (e: Exception) {
                                                     songToast = "搜索失败: ${e.message}"
@@ -1152,7 +1159,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                             }
                         },
                         supportingText = {
-                            Text(if (songToast.isNotEmpty()) songToast else "搜索来源 YouTube，国内网络需代理。搜索结果可点选直接下载 MP3")
+                            Text(if (songToast.isNotEmpty()) songToast else "B站优先、YouTube兜底，自动搜索可点选直接下载 MP3")
                         }
                     )
 
@@ -1169,7 +1176,11 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                     songResults.forEach { r ->
                                         Card(
                                             modifier = Modifier.fillMaxWidth().clickable {
-                                                videoUrl = "https://www.youtube.com/watch?v=${r.videoId}"
+                                                videoUrl = if (r.source == "bilibili") {
+                                                    "https://www.bilibili.com/video/${r.videoId}"
+                                                } else {
+                                                    "https://www.youtube.com/watch?v=${r.videoId}"
+                                                }
                                                 customVideoTitle = r.title
                                                 fetchedVideoTitle = r.title
                                                 showSongResults = false
@@ -1179,7 +1190,11 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                         ) {
                                             Column(Modifier.padding(10.dp)) {
                                                 Text(r.title, fontWeight = FontWeight.Bold, maxLines = 2)
-                                                Text("${r.channel}   ${r.duration}", style = MaterialTheme.typography.bodySmall)
+                                                Text(
+                                                    if (r.source == "bilibili") "[B站] ${r.channel}   ${r.duration}"
+                                                    else "[YouTube] ${r.channel}   ${r.duration}",
+                                                    style = MaterialTheme.typography.bodySmall
+                                                )
                                             }
                                         }
                                     }
