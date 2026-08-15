@@ -262,13 +262,66 @@ object NetworkDownloader {
     }
 
 
-    // 歌曲搜索：从 YouTube 搜索返回结果列表（videoId, title...）
+    // 歌曲搜索：统一返回结果列表（videoId 存 bvid 或 yt videoId, source 标记来源）
     data class SongResult(
         val videoId: String,
         val title: String,
         val channel: String,
-        val duration: String
+        val duration: String,
+        val source: String = "youtube"
     )
+
+    // 从 B 站搜索视频（歌曲），返回结果列表（source 标记 bilibili）
+    suspend fun searchBilibiliMusic(context: Context, query: String, limit: Int = 5): List<SongResult> {
+        return withContext(Dispatchers.IO) {
+            val results = mutableListOf<SongResult>()
+            if (query.isBlank()) return@withContext results
+            try {
+                val enc = java.net.URLEncoder.encode(query, "UTF-8")
+                val searchUrl = "https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=$enc"
+                val req = Request.Builder().url(searchUrl)
+                    .header("User-Agent", USER_AGENT)
+                    .header("Referer", "https://www.bilibili.com/")
+                    .header("Cookie", "buvid3=infoc")
+                    .build()
+                client.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val json = JSONObject(res.body?.string() ?: "")
+                        if (json.optInt("code") == 0) {
+                            val resultArr = json.optJSONObject("data")?.optJSONArray("result")
+                            if (resultArr != null) {
+                                for (i in 0 until resultArr.length()) {
+                                    if (results.size >= limit) break
+                                    val item = resultArr.optJSONObject(i)
+                                    if (item == null) continue
+                                    if (item.optString("type") != "video") continue
+                                    val bvid = item.optString("bvid")
+                                    var title = item.optString("title")
+                                        .replace(Regex("</?em>"), "")
+                                        .replace(Regex("<em class=\"keyword\">"), "")
+                                        .trim()
+                                    val author = item.optString("author")
+                                    val duration = item.optString("duration")
+                                    if (!bvid.isNullOrBlank() && !title.isNullOrBlank()) {
+                                        results.add(SongResult(
+                                            videoId = bvid,
+                                            title = title,
+                                            channel = author,
+                                            duration = duration,
+                                            source = "bilibili"
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                AppLogger.log(context, "【歌曲搜索-B站】失败: ${e.message}")
+            }
+            results
+        }
+    }
 
     suspend fun searchYouTubeMusic(context: Context, query: String, limit: Int = 5): List<SongResult> {
         return withContext(Dispatchers.IO) {
