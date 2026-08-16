@@ -164,7 +164,6 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     var currentTaskName by remember { mutableStateOf("") }
     var taskProgress by remember { mutableFloatStateOf(0f) }
     var taskProgressText by remember { mutableStateOf("") }
-    val isConverting = currentJob != null || queueRunning
 
     var showErrorDialog by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf("") }
@@ -204,6 +203,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     var queueFolderName by remember { mutableStateOf("") }
     val queueTaskIdCounter = remember { AtomicLong(0) }
     val queueWorkerJob = remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    val isConverting = currentJob != null || queueRunning
 
     fun removeQueueItem(id: Long) {
         downloadQueue = downloadQueue.filter {
