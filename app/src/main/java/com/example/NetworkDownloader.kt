@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit
 object NetworkDownloader {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)  // 大文件下载友好：CDN 偶发停顿不应导致超时
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -1236,12 +1236,26 @@ object NetworkDownloader {
         return try {
             client.newCall(downloadReq).execute().use { response ->
                 if (!response.isSuccessful) {
-                    AppLogger.log(context, "下载媒体流失败，HTTP状态码: ${response.code}")
+                    val errorMsg = when (response.code) {
+                        403 -> "HTTP 403: 防盗链/风控拦截，可能需要更换请求来源"
+                        404 -> "HTTP 404: 资源不存在，链接可能已失效"
+                        429 -> "HTTP 429: 请求过于频繁，被限流"
+                        in 500..599 -> "HTTP ${response.code}: 服务器内部错误，请稍后重试"
+                        else -> "HTTP ${response.code}: 下载失败"
+                    }
+                    AppLogger.log(context, "下载媒体流失败: $errorMsg")
+                    onProgress?.invoke(0f, "错误: $errorMsg")
                     return false
                 }
 
                 val body = response.body ?: return false
                 val contentLength = body.contentLength()
+
+                // Content-Length 可疑检测：1KB~100KB 可能是错误页面而非真实媒体
+                if (!isAudioStreamDirect && contentLength in 1..100_000) {
+                    AppLogger.log(context, "⚠️ Content-Length 仅 ${contentLength}B，可能是错误页面而非媒体文件，继续尝试下载...")
+                    onProgress?.invoke(0f, "警告: 响应体仅 ${contentLength / 1024}KB，可能非媒体文件")
+                }
 
                 if (isMp3 && !isAudioStreamDirect) {
                     // 场景：下载完整视频流，然后提取音频

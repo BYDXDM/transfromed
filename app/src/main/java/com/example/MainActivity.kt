@@ -2097,7 +2097,10 @@ suspend fun doVideoDownloadWithRetry(
         success = NetworkDownloader.downloadVideo(context, url, outputUri, isMp3, onProgress)
         if (!success) {
             retries++
-            AppLogger.w(context, "解析下载重试 ($retries/3): $url", "视频解析")
+            if (retries < 3) {
+                AppLogger.w(context, "解析下载重试 ($retries/3): $url，等待 1.5 秒后重试...", "视频解析")
+                kotlinx.coroutines.delay(1500L)  // 重试间隔：给网络恢复时间
+            }
         }
     }
     if (!success) {
