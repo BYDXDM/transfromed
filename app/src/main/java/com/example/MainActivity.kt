@@ -90,6 +90,20 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import java.nio.ByteBuffer
 import android.app.AlertDialog
+import java.util.concurrent.atomic.AtomicLong
+
+// ===== 下载队列数据模型 =====
+enum class DownloadStatus { WAITING, RUNNING, DONE, FAILED }
+
+data class DownloadTask(
+    val id: Long,
+    val url: String,
+    val isMp3: Boolean,
+    val fileName: String,
+    var status: DownloadStatus,
+    var progress: Float,
+    var message: String
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -150,7 +164,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     var currentTaskName by remember { mutableStateOf("") }
     var taskProgress by remember { mutableFloatStateOf(0f) }
     var taskProgressText by remember { mutableStateOf("") }
-    val isConverting = currentJob != null
+    val isConverting = currentJob != null || queueRunning
 
     var showErrorDialog by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf("") }
@@ -180,6 +194,160 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                 taskProgressText = status
             }
             Unit
+        }
+    }
+
+    // ===== 下载队列状态 =====
+    var downloadQueue by remember { mutableStateOf<List<DownloadTask>>(emptyList()) }
+    var queueRunning by remember { mutableStateOf(false) }
+    var queueFolderUri by remember { mutableStateOf<Uri?>(null) }
+    var queueFolderName by remember { mutableStateOf("") }
+    val queueTaskIdCounter = remember { AtomicLong(0) }
+    val queueWorkerJob = remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
+    fun removeQueueItem(id: Long) {
+        downloadQueue = downloadQueue.filter {
+            it.id != id || it.status == DownloadStatus.RUNNING
+        }
+    }
+
+    fun clearQueue() {
+        downloadQueue = downloadQueue.filter { it.status == DownloadStatus.RUNNING }
+    }
+
+    fun startQueueWorker() {
+        if (queueRunning) return
+        val folderUri = queueFolderUri ?: return
+        queueRunning = true
+        val job = coroutineScope.launch(Dispatchers.IO) {
+            try {
+                while (true) {
+                    val nextTask = downloadQueue.firstOrNull { it.status == DownloadStatus.WAITING }
+                        ?: break
+                    // Update status to RUNNING on main thread
+                    withContext(Dispatchers.Main) {
+                        downloadQueue = downloadQueue.map {
+                            if (it.id == nextTask.id) it.copy(status = DownloadStatus.RUNNING, progress = 0f, message = "准备下载...")
+                            else it
+                        }
+                    }
+                    // Create output file in selected folder
+                    val docDir = DocumentFile.fromTreeUri(context, folderUri)
+                    val mimeType = if (nextTask.isMp3) "audio/mpeg" else "video/mp4"
+                    val docFile = docDir?.createFile(mimeType, nextTask.fileName)
+                    if (docFile == null) {
+                        withContext(Dispatchers.Main) {
+                            downloadQueue = downloadQueue.map {
+                                if (it.id == nextTask.id) it.copy(status = DownloadStatus.FAILED, message = "无法创建文件")
+                                else it
+                            }
+                        }
+                        continue
+                    }
+                    // Update progress callback for this task
+                    val onQueueProgress: (Float, String) -> Unit = { pct, status ->
+                        val taskId = nextTask.id
+                        coroutineScope.launch(Dispatchers.Main) {
+                            downloadQueue = downloadQueue.map {
+                                if (it.id == taskId) it.copy(progress = pct, message = status)
+                                else it
+                            }
+                        }
+                        Unit
+                    }
+                    // Also update the main progress card
+                    val onMainProgress: (Float, String) -> Unit = { pct, status ->
+                        coroutineScope.launch(Dispatchers.Main) {
+                            taskProgress = pct
+                            taskProgressText = "[队列] ${nextTask.fileName}: $status"
+                        }
+                        Unit
+                    }
+                    val combinedProgress: (Float, String) -> Unit = { pct, status ->
+                        onQueueProgress(pct, status)
+                        onMainProgress(pct, status)
+                        Unit
+                    }
+                    try {
+                        coroutineScope.launch(Dispatchers.Main) {
+                            currentTaskName = "队列下载: ${nextTask.fileName}"
+                            taskProgress = 0f
+                            taskProgressText = "正在下载..."
+                        }
+                        val success = doVideoDownloadWithRetry(
+                            context = context,
+                            url = nextTask.url,
+                            outputUri = docFile.uri,
+                            isMp3 = nextTask.isMp3,
+                            onProgress = combinedProgress
+                        )
+                        val resultStatus = if (success) DownloadStatus.DONE else DownloadStatus.FAILED
+                        val resultMsg = if (success) "下载完成" else "下载失败(已重试3次)"
+                        viewModel.addHistory(
+                            nextTask.fileName,
+                            if (nextTask.isMp3) "下载视频(MP3)" else "下载视频(MP4)",
+                            success,
+                            if (success) docFile.uri.toString() else null
+                        )
+                        withContext(Dispatchers.Main) {
+                            downloadQueue = downloadQueue.map {
+                                if (it.id == nextTask.id) it.copy(status = resultStatus, progress = if (success) 1f else it.progress, message = resultMsg)
+                                else it
+                            }
+                            if (success) {
+                                Toast.makeText(context, "✅ ${nextTask.fileName} 下载完成", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        withContext(Dispatchers.Main) {
+                            downloadQueue = downloadQueue.map {
+                                if (it.id == nextTask.id) it.copy(status = DownloadStatus.FAILED, message = "异常: ${e.message}")
+                                else it
+                            }
+                        }
+                    }
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    queueRunning = false
+                    queueWorkerJob.value = null
+                    // Clear main progress if queue is done
+                    if (downloadQueue.none { it.status == DownloadStatus.RUNNING }) {
+                        taskProgress = 0f
+                        taskProgressText = ""
+                    }
+                }
+            }
+        }
+        queueWorkerJob.value = job
+    }
+
+    fun addToQueue(url: String, isMp3: Boolean, fileName: String) {
+        val id = queueTaskIdCounter.incrementAndGet()
+        val task = DownloadTask(
+            id = id,
+            url = url,
+            isMp3 = isMp3,
+            fileName = fileName,
+            status = DownloadStatus.WAITING,
+            progress = 0f,
+            message = "等待下载..."
+        )
+        downloadQueue = downloadQueue + task
+        if (!queueRunning) {
+            startQueueWorker()
+        }
+    }
+
+    fun retryQueueItem(id: Long) {
+        downloadQueue = downloadQueue.map {
+            if (it.id == id && it.status == DownloadStatus.FAILED) {
+                it.copy(status = DownloadStatus.WAITING, progress = 0f, message = "等待重试...")
+            } else it
+        }
+        if (!queueRunning) {
+            startQueueWorker()
         }
     }
 
@@ -527,6 +695,30 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     currentJob = null
                 }
             }
+        }
+    }
+
+    // ===== 批量下载文件夹选择器 =====
+    val queueFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let {
+            queueFolderUri = it
+            queueFolderName = DocumentFile.fromTreeUri(context, it)?.name ?: "已选择文件夹"
+            viewModel.saveOutputDir("dlqueue", it.toString())
+            Toast.makeText(context, "已选择下载文件夹，可批量添加视频", Toast.LENGTH_SHORT).show()
+            // 如果有等待中的任务，开始消费
+            if (downloadQueue.any { t -> t.status == DownloadStatus.WAITING }) {
+                startQueueWorker()
+            }
+        }
+    }
+
+    // 启动时恢复上次选择的下载文件夹
+    LaunchedEffect(Unit) {
+        val savedDir = viewModel.getOutputDir("dlqueue")
+        if (savedDir != null) {
+            val uri = Uri.parse(savedDir)
+            queueFolderUri = uri
+            queueFolderName = DocumentFile.fromTreeUri(context, uri)?.name ?: "已选择文件夹"
         }
     }
 
@@ -1280,35 +1472,66 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Button(
-                            onClick = { 
+                            onClick = {
                                 val targetName = suggestFileName(videoUrl, "mp4", customVideoTitle.ifBlank { fetchedVideoTitle })
-                                videoSaverMp4.launch(targetName) 
+                                if (queueFolderUri == null) {
+                                    // 先选文件夹，选完后需手动再点一次
+                                    queueFolderPicker.launch(null)
+                                    Toast.makeText(context, "请先选择下载文件夹，然后再次点击下载", Toast.LENGTH_LONG).show()
+                                } else {
+                                    addToQueue(videoUrl, false, targetName)
+                                    Toast.makeText(context, "✅ 已加入队列: $targetName", Toast.LENGTH_SHORT).show()
+                                }
                             },
                             enabled = videoUrl.isNotEmpty() && !isConverting,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("下载 MP4", maxLines = 1)
+                            Text("📥 下载 MP4", maxLines = 1)
                         }
                         Button(
-                            onClick = { 
+                            onClick = {
                                 val targetName = suggestFileName(videoUrl, "mp3", customVideoTitle.ifBlank { fetchedVideoTitle })
-                                videoSaverMp3.launch(targetName) 
+                                if (queueFolderUri == null) {
+                                    queueFolderPicker.launch(null)
+                                    Toast.makeText(context, "请先选择下载文件夹，然后再次点击下载", Toast.LENGTH_LONG).show()
+                                } else {
+                                    addToQueue(videoUrl, true, targetName)
+                                    Toast.makeText(context, "✅ 已加入队列: $targetName", Toast.LENGTH_SHORT).show()
+                                }
                             },
                             enabled = videoUrl.isNotEmpty() && !isConverting,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("下载 MP3", maxLines = 1)
+                            Text("📥 下载 MP3", maxLines = 1)
                         }
                     }
 
-                    OutlinedButton(
-                        onClick = { videoFolderSaverMp4.launch(null) },
-                        enabled = videoUrl.isNotEmpty() && !isConverting,
-                        modifier = Modifier.fillMaxWidth()
+                    // 文件夹选择状态 + 选择按钮
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("选择保存文件夹 (自动按标题命名并直接存入)")
+                        Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                        if (queueFolderUri != null) {
+                            Text(
+                                text = "📁 $queueFolderName",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            Text(
+                                text = "未选择文件夹 (需先选文件夹再下载)",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(onClick = { queueFolderPicker.launch(null) }) {
+                            Text(if (queueFolderUri != null) "更换" else "选择文件夹")
+                        }
                     }
                 }
             }
@@ -1382,6 +1605,16 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                             onClick = {
                                 currentJob?.cancel()
                                 currentJob = null
+                                // 同时取消队列 worker
+                                queueWorkerJob.value?.cancel()
+                                queueWorkerJob.value = null
+                                queueRunning = false
+                                // 将队列中 RUNNING 的任务标记回 WAITING
+                                downloadQueue = downloadQueue.map {
+                                    if (it.status == DownloadStatus.RUNNING)
+                                        it.copy(status = DownloadStatus.FAILED, message = "用户取消")
+                                    else it
+                                }
                                 taskProgress = 0f
                                 taskProgressText = ""
                                 Toast.makeText(context, "任务已取消", Toast.LENGTH_SHORT).show()
@@ -1395,7 +1628,169 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
             }
 
             Spacer(modifier = Modifier.height(8.dp))
-            
+
+            // ===== 下载队列面板 =====
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = cardContainerColor)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // 标题行
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val runningCount = downloadQueue.count { it.status == DownloadStatus.RUNNING }
+                        val totalCount = downloadQueue.size
+                        Text(
+                            text = "📋 下载队列 ($runningCount/$totalCount)",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                        )
+                        if (downloadQueue.isNotEmpty()) {
+                            TextButton(
+                                onClick = { clearQueue() },
+                                enabled = downloadQueue.any { it.status != DownloadStatus.RUNNING }
+                            ) {
+                                Text("清空队列", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+
+                    // 队列为空时的提示
+                    if (downloadQueue.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "队列为空，粘贴链接后点击下载即加入队列",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        // 逐个任务显示
+                        downloadQueue.forEach { task ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = when (task.status) {
+                                        DownloadStatus.RUNNING -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                                        DownloadStatus.DONE -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
+                                        DownloadStatus.FAILED -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                                        DownloadStatus.WAITING -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                    }
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        // 状态图标 + 文件名
+                                        Row(
+                                            modifier = Modifier.weight(1f),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Text(
+                                                text = when (task.status) {
+                                                    DownloadStatus.WAITING -> "⏳"
+                                                    DownloadStatus.RUNNING -> "📥"
+                                                    DownloadStatus.DONE -> "✅"
+                                                    DownloadStatus.FAILED -> "❌"
+                                                },
+                                                style = MaterialTheme.typography.titleMedium
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = task.fileName,
+                                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                                    maxLines = 1,
+                                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    text = "${if (task.isMp3) "MP3" else "MP4"} · ${task.message}",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+
+                                        // 操作按钮
+                                        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                            if (task.status == DownloadStatus.FAILED) {
+                                                IconButton(
+                                                    onClick = { retryQueueItem(task.id) },
+                                                    modifier = Modifier.size(32.dp)
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.Refresh,
+                                                        contentDescription = "重试",
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
+                                            if (task.status != DownloadStatus.RUNNING) {
+                                                IconButton(
+                                                    onClick = {
+                                                        downloadQueue = downloadQueue.filter { it.id != task.id }
+                                                    },
+                                                    modifier = Modifier.size(32.dp)
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.DeleteOutline,
+                                                        contentDescription = "删除",
+                                                        tint = MaterialTheme.colorScheme.error,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 进度条
+                                    if (task.status == DownloadStatus.RUNNING) {
+                                        LinearProgressIndicator(
+                                            progress = task.progress.coerceIn(0f, 1f),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(6.dp)
+                                                .clip(RoundedCornerShape(3.dp)),
+                                            color = MaterialTheme.colorScheme.primary,
+                                            trackColor = MaterialTheme.colorScheme.surfaceVariant
+                                        )
+                                    } else if (task.status == DownloadStatus.DONE) {
+                                        LinearProgressIndicator(
+                                            progress = 1f,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(6.dp)
+                                                .clip(RoundedCornerShape(3.dp)),
+                                            color = MaterialTheme.colorScheme.tertiary,
+                                            trackColor = MaterialTheme.colorScheme.surfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
             val filteredHistoryList = remember(historyList, selectedFilterTag) {
                 when (selectedFilterTag) {
                     "EPUB" -> historyList.filter { it.conversionType.contains("EPUB", ignoreCase = true) }
