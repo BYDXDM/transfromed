@@ -1006,6 +1006,7 @@ object NetworkDownloader {
             try { audioPfd?.close() } catch (_: Exception) {}
             try { outPfd?.close() } catch (_: Exception) {}
         }
+        return false  // finally 后的兜底返回
     }
 
     // ============================================================================
