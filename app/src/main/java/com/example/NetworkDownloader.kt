@@ -29,6 +29,54 @@ object NetworkDownloader {
     private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     private const val MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
 
+    // ===== B站 buvid3 缓存（用于绕过 412 风控） =====
+    @Volatile
+    private var cachedBuvid3: String? = null
+    private var buvid3FetchTime: Long = 0L
+    private const val BUVID3_CACHE_TTL_MS = 30 * 60 * 1000L // 30 分钟有效期
+
+    /**
+     * 通过 B站 spi 接口获取真实的 buvid3 cookie 值。
+     * 返回缓存值（如果未过期），否则发起网络请求并缓存结果。
+     * 修复：B站搜索接口会校验 buvid3，使用 "infoc" 假值会返回 412。
+     */
+    suspend fun fetchBuvid3(context: Context): String {
+        val now = System.currentTimeMillis()
+        val cached = cachedBuvid3
+        if (cached != null && (now - buvid3FetchTime) < BUVID3_CACHE_TTL_MS) {
+            return cached
+        }
+        return withContext(Dispatchers.IO) {
+            try {
+                val req = Request.Builder()
+                    .url("https://api.bilibili.com/x/frontend/finger/spi")
+                    .header("User-Agent", USER_AGENT)
+                    .header("Referer", "https://www.bilibili.com/")
+                    .build()
+                client.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val body = res.body?.string() ?: ""
+                        val json = JSONObject(body)
+                        if (json.optInt("code") == 0) {
+                            val buvid3 = json.optJSONObject("data")?.optString("b_3")
+                            if (!buvid3.isNullOrBlank()) {
+                                cachedBuvid3 = buvid3
+                                buvid3FetchTime = System.currentTimeMillis()
+                                AppLogger.log(context, "【B站】成功获取真实 buvid3: ${buvid3.take(16)}...")
+                                return@withContext buvid3
+                            }
+                        }
+                    }
+                    AppLogger.log(context, "【B站】获取 buvid3 失败，使用 fallback")
+                    return@withContext "infoc"
+                }
+            } catch (e: Exception) {
+                AppLogger.log(context, "【B站】获取 buvid3 异常: ${e.message}，使用 fallback")
+                return@withContext "infoc"
+            }
+        }
+    }
+
     fun sanitizeUrlInput(rawInput: String): String {
         if (rawInput.isBlank()) return ""
         
@@ -190,10 +238,12 @@ object NetworkDownloader {
                     val bvid = extractBvid(context, resolved)
                     if (bvid != null) {
                         try {
+                            val buvid3 = fetchBuvid3(context)
                             val req = Request.Builder()
                                 .url("https://api.bilibili.com/x/web-interface/view?bvid=$bvid")
                                 .header("User-Agent", USER_AGENT)
                                 .header("Referer", "https://www.bilibili.com/")
+                                .header("Cookie", "buvid3=$buvid3")
                                 .build()
                             client.newCall(req).execute().use { res ->
                                 if (res.isSuccessful) {
@@ -272,17 +322,19 @@ object NetworkDownloader {
     )
 
     // 从 B 站搜索视频（歌曲），返回结果列表（source 标记 bilibili）
+    // 修复：使用真实 buvid3 cookie 绕过 412 风控
     suspend fun searchBilibiliMusic(context: Context, query: String, limit: Int = 5): List<SongResult> {
         return withContext(Dispatchers.IO) {
             val results = mutableListOf<SongResult>()
             if (query.isBlank()) return@withContext results
             try {
+                val buvid3 = fetchBuvid3(context)
                 val enc = java.net.URLEncoder.encode(query, "UTF-8")
                 val searchUrl = "https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=$enc"
                 val req = Request.Builder().url(searchUrl)
                     .header("User-Agent", USER_AGENT)
                     .header("Referer", "https://www.bilibili.com/")
-                    .header("Cookie", "buvid3=infoc")
+                    .header("Cookie", "buvid3=$buvid3")
                     .build()
                 client.newCall(req).execute().use { res ->
                     if (res.isSuccessful) {
@@ -557,11 +609,12 @@ object NetworkDownloader {
         if (bvid != null) {
             AppLogger.log(context, "【B站-方案1】尝试网页 HTML window.__playinfo__ 直接提取...")
             try {
+                val buvid3 = fetchBuvid3(context)
                 val pageReq = Request.Builder()
                     .url("https://www.bilibili.com/video/$bvid/")
                     .header("User-Agent", USER_AGENT)
                     .header("Referer", "https://www.bilibili.com/")
-                    .header("Cookie", "CURRENT_FNVAL=16")
+                    .header("Cookie", "buvid3=$buvid3; CURRENT_FNVAL=16")
                     .build()
                 client.newCall(pageReq).execute().use { pageRes ->
                     val html = pageRes.body?.string() ?: ""
@@ -617,10 +670,12 @@ object NetworkDownloader {
         if (mediaUrl.isNullOrEmpty() && bvid != null) {
             AppLogger.log(context, "【B站-方案2】切换至 Bilibili 官方 API 接口 (view & playurl)...")
             try {
+                val buvid3 = fetchBuvid3(context)
                 val infoRequest = Request.Builder()
                     .url("https://api.bilibili.com/x/web-interface/view?bvid=$bvid")
                     .header("User-Agent", USER_AGENT)
                     .header("Referer", "https://www.bilibili.com/")
+                    .header("Cookie", "buvid3=$buvid3")
                     .build()
 
                 client.newCall(infoRequest).execute().use { infoResponse ->
@@ -633,6 +688,7 @@ object NetworkDownloader {
                             .url("https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$cid&qn=64&fnval=1")
                             .header("User-Agent", USER_AGENT)
                             .header("Referer", "https://www.bilibili.com/")
+                            .header("Cookie", "buvid3=$buvid3")
                             .build()
                         client.newCall(playUrlReq).execute().use { playRes ->
                             val playJson = JSONObject(playRes.body?.string() ?: "")
@@ -1167,10 +1223,14 @@ object NetworkDownloader {
         onProgress: ((Float, String) -> Unit)? = null
     ): Boolean {
         AppLogger.log(context, "连接媒体服务地址: $mediaUrl")
+        // 优化：添加完整的请求头以兼容各平台的防盗链机制
         val downloadReq = Request.Builder()
             .url(mediaUrl)
             .header("Referer", referer)
             .header("User-Agent", USER_AGENT)
+            .header("Accept", "*/*")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Connection", "keep-alive")
             .build()
 
         return try {
@@ -1184,6 +1244,7 @@ object NetworkDownloader {
                 val contentLength = body.contentLength()
 
                 if (isMp3 && !isAudioStreamDirect) {
+                    // 场景：下载完整视频流，然后提取音频
                     val tempFile = File(context.cacheDir, "temp_download_${System.currentTimeMillis()}.mp4")
                     tempFile.outputStream().use { fileOut ->
                         body.byteStream().use { input ->
@@ -1218,6 +1279,61 @@ object NetworkDownloader {
                         AppLogger.log(context, "音频提取转码过程失败")
                     }
                     success
+                } else if (isMp3 && isAudioStreamDirect) {
+                    // 场景：B站/YouTube 等纯音频 DASH 流（m4a/aac）。
+                    // 修复：先下载到临时文件，再通过 MediaMuxer 封装为合法的 M4A/MP4 容器，
+                    // 避免直接保存原始 DASH 分段导致播放器无法识别。
+                    AppLogger.log(context, "检测到纯音频流(m4a/aac)，先下载再封装为 M4A 容器...")
+                    val tempFile = File(context.cacheDir, "temp_audio_${System.currentTimeMillis()}.m4a")
+                    tempFile.outputStream().use { fileOut ->
+                        body.byteStream().use { input ->
+                            copyStreamWithProgress(
+                                input = input,
+                                output = fileOut,
+                                contentLength = contentLength,
+                                basePct = 0.15f,
+                                pctRange = 0.70f,
+                                statusPrefix = "正在下载纯音频",
+                                onProgress = onProgress
+                            )
+                        }
+                    }
+                    AppLogger.log(context, "纯音频下载完毕，正在封装为 M4A 容器...")
+                    onProgress?.invoke(0.85f, "音频下载完毕，开始封装 (85%)...")
+
+                    val success = convertMp4ToAudio(
+                        context = context,
+                        inputUri = Uri.fromFile(tempFile),
+                        outputUri = outputUri,
+                        onProgress = onProgress,
+                        basePct = 0.85f,
+                        pctRange = 0.15f,
+                        taskLabel = "封装M4A音频"
+                    )
+                    tempFile.delete()
+                    if (success) {
+                        onProgress?.invoke(1.0f, "M4A 音频封装完成 (100%)")
+                        AppLogger.log(context, "纯音频流已成功封装为合法的 M4A 容器")
+                    } else {
+                        AppLogger.log(context, "M4A 封装失败，尝试直接保存原始流...")
+                        // fallback: 直接保存原始流
+                        context.contentResolver.openOutputStream(outputUri)?.use { out ->
+                            tempFile.inputStream().use { input ->
+                                copyStreamWithProgress(
+                                    input = input,
+                                    output = out,
+                                    contentLength = tempFile.length(),
+                                    basePct = 0.85f,
+                                    pctRange = 0.15f,
+                                    statusPrefix = "直接保存原始音频",
+                                    onProgress = onProgress
+                                )
+                            }
+                        }
+                        onProgress?.invoke(1.0f, "原始音频已直接保存 (100%)")
+                        AppLogger.log(context, "已直接保存原始音频流（可能部分播放器不兼容）")
+                        true
+                    }
                 } else {
                     context.contentResolver.openOutputStream(outputUri)?.use { out ->
                         body.byteStream().use { input ->

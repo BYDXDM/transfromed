@@ -45,6 +45,9 @@ object AppLogger {
     
     private var isInitialized = false
     private val idCounter = AtomicLong(0)
+    
+    // 文件写入锁：防止多个 IO 协程并发写日志文件导致数据竞争
+    private val fileLock = Any()
 
     @Synchronized
     fun init(context: Context) {
@@ -60,7 +63,7 @@ object AppLogger {
     }
 
     fun disableLogging() {
-        isLogging = true
+        isLogging = false
     }
 
     @Synchronized
@@ -92,14 +95,16 @@ object AppLogger {
         _logs.value = currentList
         
         CoroutineScope(Dispatchers.IO).launch {
-            val file = File(context.filesDir, "app_log.txt")
-            try {
-                file.appendText(formattedLine + "\n")
-                if (file.length() > MAX_SIZE) {
-                    manageLogFile(file)
+            synchronized(fileLock) {
+                val file = File(context.filesDir, "app_log.txt")
+                try {
+                    file.appendText(formattedLine + "\n")
+                    if (file.length() > MAX_SIZE) {
+                        manageLogFile(file)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
             }
         }
     }
@@ -212,9 +217,11 @@ object AppLogger {
 
     @Synchronized
     fun clearLog(context: Context) {
-        val file = File(context.filesDir, "app_log.txt")
-        if (file.exists()) {
-            file.delete()
+        synchronized(fileLock) {
+            val file = File(context.filesDir, "app_log.txt")
+            if (file.exists()) {
+                file.delete()
+            }
         }
         _logs.value = emptyList()
     }
