@@ -1314,6 +1314,7 @@ object NetworkDownloader {
                     if (success) {
                         onProgress?.invoke(1.0f, "M4A 音频封装完成 (100%)")
                         AppLogger.log(context, "纯音频流已成功封装为合法的 M4A 容器")
+                        true
                     } else {
                         AppLogger.log(context, "M4A 封装失败，尝试直接保存原始流...")
                         // fallback: 直接保存原始流
