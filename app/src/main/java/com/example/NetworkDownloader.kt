@@ -582,7 +582,61 @@ object NetworkDownloader {
     }
 
     // ============================================================================
-    // 1. 哔哩哔哩 (Bilibili) 预留三种以上解析备用方案
+    // Bilibili response helpers
+    // ============================================================================
+    internal data class BilibiliMediaSelection(
+        val mediaUrl: String?,
+        val isAudioStreamDirect: Boolean
+    )
+
+    /**
+     * Selects a playable URL from the official Bilibili playurl response.
+     * durl is preferred because it is a muxed MP4 and therefore includes audio.
+     * For MP3, a DASH audio track is preferred to avoid downloading the whole video.
+     */
+    internal fun selectBilibiliMedia(data: JSONObject, isMp3: Boolean): BilibiliMediaSelection {
+        // durl is a muxed MP4. It is the only safe video selection because a DASH
+        // video track alone has no audio and must not be saved as a silent MP4.
+        val durl = data.optJSONArray("durl")
+        if (!isMp3 && durl != null) {
+            for (index in 0 until durl.length()) {
+                val url = durl.optJSONObject(index)?.optString("url").orEmpty()
+                if ((url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true))) {
+                    return BilibiliMediaSelection(url, false)
+                }
+            }
+        }
+
+        if (isMp3) {
+            val audio = data.optJSONObject("dash")?.optJSONArray("audio")
+            if (audio != null) {
+                for (index in 0 until audio.length()) {
+                    val item = audio.optJSONObject(index) ?: continue
+                    val url = item.optString("baseUrl").ifBlank {
+                        item.optJSONArray("backupUrl")?.optString(0).orEmpty()
+                    }
+                    if ((url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true))) {
+                        return BilibiliMediaSelection(url, true)
+                    }
+                }
+            }
+
+            // MP3 can fall back to a muxed MP4 when no DASH audio track exists.
+            if (durl != null) {
+                for (index in 0 until durl.length()) {
+                    val url = durl.optJSONObject(index)?.optString("url").orEmpty()
+                    if ((url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true))) {
+                        return BilibiliMediaSelection(url, false)
+                    }
+                }
+            }
+        }
+
+        return BilibiliMediaSelection(null, false)
+    }
+
+    // ============================================================================
+    // 1. 哔哩哔哩 (Bilibili) 官方接口解析与备用方案
     // ============================================================================
     private suspend fun downloadBilibiliMultiSource(
         context: Context, 
@@ -684,19 +738,42 @@ object NetworkDownloader {
                         val cid = infoJson.getJSONObject("data").getLong("cid")
                         
                         // 2a. Standard playurl API
-                        val playUrlReq = Request.Builder()
-                            .url("https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$cid&qn=64&fnval=1")
-                            .header("User-Agent", USER_AGENT)
-                            .header("Referer", "https://www.bilibili.com/")
-                            .header("Cookie", "buvid3=$buvid3")
-                            .build()
-                        client.newCall(playUrlReq).execute().use { playRes ->
-                            val playJson = JSONObject(playRes.body?.string() ?: "")
-                            if (playJson.optInt("code") == 0) {
-                                val durlArray = playJson.optJSONObject("data")?.optJSONArray("durl")
-                                if (durlArray != null && durlArray.length() > 0) {
-                                    mediaUrl = durlArray.getJSONObject(0).optString("url")
-                                    AppLogger.log(context, "【B站-方案2】通过官方 Web PlayURL 成功抓取视频流")
+                        // fnval=0 requests a muxed MP4 (video + audio), which is
+                        // the safest format for MP4 downloads and avoids silent DASH files.
+                        val playUrlRequests = if (isMp3) {
+                            // DASH exposes a direct audio track; avoid downloading a full MP4.
+                            listOf(
+                                "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$cid&qn=64&fnval=16",
+                                "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$cid&qn=64&fnval=0"
+                            )
+                        } else {
+                            // Only request muxed MP4 for video downloads. A video-only DASH
+                            // track must never be saved as an apparently valid silent MP4.
+                            listOf(
+                                "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$cid&qn=64&fnval=0"
+                            )
+                        }
+                        for (playUrl in playUrlRequests) {
+                            if (!mediaUrl.isNullOrEmpty()) break
+                            val playUrlReq = Request.Builder()
+                                .url(playUrl)
+                                .header("User-Agent", USER_AGENT)
+                                .header("Referer", "https://www.bilibili.com/")
+                                .header("Cookie", "buvid3=$buvid3")
+                                .build()
+                            client.newCall(playUrlReq).execute().use { playRes ->
+                                val playJson = JSONObject(playRes.body?.string() ?: "")
+                                val code = playJson.optInt("code", -1)
+                                val data = playJson.optJSONObject("data")
+                                if (code == 0 && data != null) {
+                                    val selection = selectBilibiliMedia(data, isMp3)
+                                    mediaUrl = selection.mediaUrl
+                                    isAudioStreamDirect = selection.isAudioStreamDirect
+                                    if (!mediaUrl.isNullOrEmpty()) {
+                                        AppLogger.log(context, "【B站-方案2】官方 PlayURL 成功，格式=${if (isAudioStreamDirect) "DASH音频" else "MP4/视频"}")
+                                    }
+                                } else {
+                                    AppLogger.log(context, "【B站-方案2】PlayURL 返回 code=$code，继续尝试备用格式")
                                 }
                             }
                         }
