@@ -603,7 +603,6 @@ object NetworkDownloader {
         }
 
         var mediaUrl: String? = null
-        var audioUrl: String? = null  // DASH 格式的音频流 URL（用于 MP4 合并）
         var isAudioStreamDirect = false
 
         // 方案 1: 网页HTML window.__playinfo__ 正则解析 (主方案)
@@ -656,14 +655,6 @@ object NetworkDownloader {
                                     if (videoArray != null && videoArray.length() > 0) {
                                         mediaUrl = videoArray.getJSONObject(0).optString("baseUrl")
                                         AppLogger.log(context, "【B站-方案1】成功获取dash视频流")
-                                    }
-                                    // 同时提取音频流 URL（MP4 下载需要合并音频）
-                                    if (!isMp3) {
-                                        val audioArray = dash?.optJSONArray("audio")
-                                        if (audioArray != null && audioArray.length() > 0) {
-                                            audioUrl = audioArray.getJSONObject(0).optString("baseUrl")
-                                            AppLogger.log(context, "【B站-方案1】同时获取dash音频流")
-                                        }
                                     }
                                 }
                             }
@@ -781,19 +772,6 @@ object NetworkDownloader {
             return false
         }
 
-        // DASH 格式 MP4 下载：视频流+音频流需要合并
-        if (!isMp3 && audioUrl != null && !isAudioStreamDirect) {
-            AppLogger.log(context, "【B站】检测到 DASH 格式，开始合并视频流+音频流...")
-            return downloadAndMergeDash(
-                context = context,
-                videoUrl = mediaUrl!!,
-                audioUrl = audioUrl,
-                referer = "https://www.bilibili.com/",
-                outputUri = outputUri,
-                onProgress = onProgress
-            )
-        }
-
         return downloadStreamAndSave(
             context = context,
             mediaUrl = mediaUrl!!,
@@ -803,210 +781,6 @@ object NetworkDownloader {
             isAudioStreamDirect = isAudioStreamDirect,
             onProgress = onProgress
         )
-    }
-
-    // ============================================================================
-    // B站 DASH 合并下载：视频流+音频流 → 合并为完整 MP4
-    // ============================================================================
-    private suspend fun downloadAndMergeDash(
-        context: Context,
-        videoUrl: String,
-        audioUrl: String,
-        referer: String,
-        outputUri: Uri,
-        onProgress: ((Float, String) -> Unit)? = null
-    ): Boolean {
-        val videoTemp = File(context.cacheDir, "temp_video_${System.currentTimeMillis()}.mp4")
-        val audioTemp = File(context.cacheDir, "temp_audio_${System.currentTimeMillis()}.m4a")
-        try {
-            // 1. 下载视频流 (0%~45%)
-            onProgress?.invoke(0.05f, "正在下载视频流 (5%)...")
-            val videoSuccess = downloadStreamToFile(context, videoUrl, referer, videoTemp,
-                basePct = 0.05f, pctRange = 0.40f, label = "视频流", onProgress = onProgress)
-            if (!videoSuccess) {
-                AppLogger.log(context, "【B站-DASH】视频流下载失败")
-                return false
-            }
-            AppLogger.log(context, "【B站-DASH】视频流下载完成 (${videoTemp.length()} bytes)")
-
-            // 2. 下载音频流 (45%~85%)
-            onProgress?.invoke(0.45f, "正在下载音频流 (45%)...")
-            val audioSuccess = downloadStreamToFile(context, audioUrl, referer, audioTemp,
-                basePct = 0.45f, pctRange = 0.40f, label = "音频流", onProgress = onProgress)
-            if (!audioSuccess) {
-                AppLogger.log(context, "【B站-DASH】音频流下载失败")
-                return false
-            }
-            AppLogger.log(context, "【B站-DASH】音频流下载完成 (${audioTemp.length()} bytes)")
-
-            // 3. MediaMuxer 合并视频+音频 (85%~100%)
-            onProgress?.invoke(0.85f, "正在合并音视频 (85%)...")
-            AppLogger.log(context, "【B站-DASH】开始合并音视频流...")
-            val mergeSuccess = mergeVideoAudio(context, videoTemp, audioTemp, outputUri, onProgress)
-            if (mergeSuccess) {
-                onProgress?.invoke(1.0f, "合并完成 (100%)")
-                AppLogger.log(context, "【B站-DASH】音视频合并成功!")
-            } else {
-                AppLogger.log(context, "【B站-DASH】音视频合并失败，尝试直接保存视频流...")
-                // fallback: 直接保存视频流（无声音但至少有画面）
-                context.contentResolver.openOutputStream(outputUri)?.use { out ->
-                    videoTemp.inputStream().use { input ->
-                        copyStreamWithProgress(input, out, videoTemp.length(), 0.85f, 0.15f, "保存视频", onProgress)
-                    }
-                }
-            }
-            return true
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            AppLogger.log(context, "【B站-DASH】合并下载异常: ${e.message}")
-            e.printStackTrace()
-            return false
-        } finally {
-            try { videoTemp.delete() } catch (_: Exception) {}
-            try { audioTemp.delete() } catch (_: Exception) {}
-        }
-    }
-
-    // 下载流到临时文件
-    private suspend fun downloadStreamToFile(
-        context: Context,
-        url: String,
-        referer: String,
-        tempFile: File,
-        basePct: Float,
-        pctRange: Float,
-        label: String,
-        onProgress: ((Float, String) -> Unit)? = null
-    ): Boolean {
-        return try {
-            val req = Request.Builder().url(url)
-                .header("Referer", referer)
-                .header("User-Agent", USER_AGENT)
-                .header("Accept", "*/*")
-                .build()
-            client.newCall(req).execute().use { response ->
-                if (!response.isSuccessful) {
-                    AppLogger.log(context, "【B站-DASH】$label 下载失败: HTTP ${response.code}")
-                    return false
-                }
-                val body = response.body ?: return false
-                val contentLength = body.contentLength()
-                tempFile.outputStream().use { out ->
-                    body.byteStream().use { input ->
-                        copyStreamWithProgress(input, out, contentLength, basePct, pctRange, label, onProgress)
-                    }
-                }
-                true
-            }
-        } catch (e: Exception) {
-            AppLogger.log(context, "【B站-DASH】$label 下载异常: ${e.message}")
-            false
-        }
-    }
-
-    // MediaMuxer 合并视频轨+音频轨为 MP4
-    private fun mergeVideoAudio(
-        context: Context,
-        videoFile: File,
-        audioFile: File,
-        outputUri: Uri,
-        onProgress: ((Float, String) -> Unit)? = null
-    ): Boolean {
-        var videoPfd: android.os.ParcelFileDescriptor? = null
-        var audioPfd: android.os.ParcelFileDescriptor? = null
-        var outPfd: android.os.ParcelFileDescriptor? = null
-        var videoExtractor: android.media.MediaExtractor? = null
-        var audioExtractor: android.media.MediaExtractor? = null
-        var muxer: android.media.MediaMuxer? = null
-        try {
-            val cr = context.contentResolver
-            videoPfd = cr.openFileDescriptor(android.net.Uri.fromFile(videoFile), "r")
-                ?: return false
-            audioPfd = cr.openFileDescriptor(android.net.Uri.fromFile(audioFile), "r")
-                ?: return false
-            outPfd = cr.openFileDescriptor(outputUri, "w") ?: return false
-
-            videoExtractor = android.media.MediaExtractor()
-            videoExtractor.setDataSource(videoPfd.fileDescriptor)
-            audioExtractor = android.media.MediaExtractor()
-            audioExtractor.setDataSource(audioPfd.fileDescriptor)
-
-            // 找视频轨
-            var videoTrackIndex = -1
-            var videoFormat: android.media.MediaFormat? = null
-            for (i in 0 until videoExtractor.trackCount) {
-                val fmt = videoExtractor.getTrackFormat(i)
-                if (fmt.getString(android.media.MediaFormat.KEY_MIME)?.startsWith("video/") == true) {
-                    videoTrackIndex = i
-                    videoFormat = fmt
-                    break
-                }
-            }
-            // 找音频轨
-            var audioTrackIndex = -1
-            var audioFormat: android.media.MediaFormat? = null
-            for (i in 0 until audioExtractor.trackCount) {
-                val fmt = audioExtractor.getTrackFormat(i)
-                if (fmt.getString(android.media.MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
-                    audioTrackIndex = i
-                    audioFormat = fmt
-                    break
-                }
-            }
-            if (videoTrackIndex == -1 || audioTrackIndex == -1) {
-                AppLogger.log(context, "【B站-DASH】合并失败: 未找到视频轨或音频轨")
-                return false
-            }
-
-            muxer = android.media.MediaMuxer(outPfd.fileDescriptor, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val muxVideoIdx = muxer.addTrack(videoFormat!!)
-            val muxAudioIdx = muxer.addTrack(audioFormat!!)
-            muxer.start()
-
-            // 写视频轨
-            val buf = java.nio.ByteBuffer.allocate(1024 * 1024)
-            val info = android.media.MediaCodec.BufferInfo()
-            videoExtractor.selectTrack(videoTrackIndex)
-            while (true) {
-                buf.clear()
-                val size = videoExtractor.readSampleData(buf, 0)
-                if (size < 0) break
-                info.size = size
-                info.presentationTimeUs = videoExtractor.sampleTime
-                info.flags = videoExtractor.sampleFlags
-                info.offset = 0
-                muxer.writeSampleData(muxVideoIdx, buf, info)
-                videoExtractor.advance()
-            }
-            // 写音频轨
-            audioExtractor.selectTrack(audioTrackIndex)
-            while (true) {
-                buf.clear()
-                val size = audioExtractor.readSampleData(buf, 0)
-                if (size < 0) break
-                info.size = size
-                info.presentationTimeUs = audioExtractor.sampleTime
-                info.flags = audioExtractor.sampleFlags
-                info.offset = 0
-                muxer.writeSampleData(muxAudioIdx, buf, info)
-                audioExtractor.advance()
-            }
-            onProgress?.invoke(0.98f, "合并写入完成 (98%)")
-            true
-        } catch (e: Exception) {
-            AppLogger.log(context, "【B站-DASH】MediaMuxer 合并异常: ${e.message}")
-            e.printStackTrace()
-            false
-        } finally {
-            try { muxer?.stop() } catch (_: Exception) {}
-            try { muxer?.release() } catch (_: Exception) {}
-            try { videoExtractor?.release() } catch (_: Exception) {}
-            try { audioExtractor?.release() } catch (_: Exception) {}
-            try { videoPfd?.close() } catch (_: Exception) {}
-            try { audioPfd?.close() } catch (_: Exception) {}
-            try { outPfd?.close() } catch (_: Exception) {}
-        }
-        return false  // finally 后的兜底返回
     }
 
     // ============================================================================
