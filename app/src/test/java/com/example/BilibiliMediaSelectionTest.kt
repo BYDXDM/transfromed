@@ -32,6 +32,18 @@ class BilibiliMediaSelectionTest {
     }
 
     @Test
+    fun `MP4 never falls back to a video-only DASH track`() {
+        val data = JSONObject("""
+            {"dash":{"video":[{"baseUrl":"https://cdn.example/video-only.m4s"}],"audio":[{"baseUrl":"https://cdn.example/audio.m4a"}]}}
+        """.trimIndent())
+
+        val selection = NetworkDownloader.selectBilibiliMedia(data, isMp3 = false)
+
+        assertEquals(null, selection.mediaUrl)
+        assertFalse(selection.isAudioStreamDirect)
+    }
+
+    @Test
     fun `rejects non-http media urls`() {
         val data = JSONObject("""
             {"durl":[{"url":"javascript:bad"}],"dash":{"video":[{"baseUrl":"file:///bad"}]}}

@@ -594,6 +594,11 @@ object NetworkDownloader {
      * durl is preferred because it is a muxed MP4 and therefore includes audio.
      * For MP3, a DASH audio track is preferred to avoid downloading the whole video.
      */
+    internal fun isExpectedMp4ContentType(contentType: String?): Boolean {
+        val normalized = contentType?.substringBefore(';')?.trim()?.lowercase().orEmpty()
+        return normalized.isEmpty() || normalized.startsWith("video/") || normalized == "application/octet-stream"
+    }
+
     internal fun selectBilibiliMedia(data: JSONObject, isMp3: Boolean): BilibiliMediaSelection {
         // durl is a muxed MP4. It is the only safe video selection because a DASH
         // video track alone has no audio and must not be saved as a silent MP4.
@@ -697,19 +702,13 @@ object NetworkDownloader {
                             }
 
                             if (mediaUrl.isNullOrEmpty()) {
-                                if (data.has("durl")) {
-                                    val durl = data.optJSONArray("durl")
-                                    if (durl != null && durl.length() > 0) {
-                                        mediaUrl = durl.getJSONObject(0).optString("url")
-                                        AppLogger.log(context, "【B站-方案1】成功获取durl视频流")
-                                    }
-                                } else if (data.has("dash")) {
-                                    val dash = data.optJSONObject("dash")
-                                    val videoArray = dash?.optJSONArray("video")
-                                    if (videoArray != null && videoArray.length() > 0) {
-                                        mediaUrl = videoArray.getJSONObject(0).optString("baseUrl")
-                                        AppLogger.log(context, "【B站-方案1】成功获取dash视频流")
-                                    }
+                                // Use the same policy as the official API. In MP4 mode this
+                                // deliberately rejects video-only DASH tracks with no audio.
+                                val selection = selectBilibiliMedia(data, isMp3)
+                                mediaUrl = selection.mediaUrl
+                                isAudioStreamDirect = selection.isAudioStreamDirect
+                                if (!mediaUrl.isNullOrEmpty()) {
+                                    AppLogger.log(context, "【B站-方案1】成功获取${if (isAudioStreamDirect) "DASH音频" else "durl合并媒体"}")
                                 }
                             }
                         }
@@ -803,8 +802,14 @@ object NetworkDownloader {
             }
         }
 
-        // 方案 3: 开放多渠道第三方换源 API (备用方案 3)
-        if (mediaUrl.isNullOrEmpty()) {
+        // 第三方解析器可能把 DASH 音频 m4a 当作“视频链接”返回；MP4 仅接受官方 durl。
+        if (!isMp3 && mediaUrl.isNullOrEmpty()) {
+            AppLogger.log(context, "【B站】官方合并 MP4 未返回 durl，拒绝第三方音频流回退")
+            return false
+        }
+
+        // 方案 3: 开放多渠道第三方换源 API（仅 MP3 的最后回退）
+        if (isMp3 && mediaUrl.isNullOrEmpty()) {
             AppLogger.log(context, "【B站-方案3】尝试开放第三方多渠道换源解析...")
             val videoTargetUrl = if (bvid != null) "https://www.bilibili.com/video/$bvid" else resolvedUrl
             val openApis = listOf(
@@ -1327,6 +1332,14 @@ object NetworkDownloader {
 
                 val body = response.body ?: return false
                 val contentLength = body.contentLength()
+                val contentType = body.contentType()?.toString()
+
+                // MP4 downloads must never write a DASH audio response into a video document.
+                if (!isMp3 && !isExpectedMp4ContentType(contentType)) {
+                    AppLogger.log(context, "拒绝非视频响应作为 MP4 保存: Content-Type=$contentType")
+                    onProgress?.invoke(0f, "错误: 服务返回音频流，已拒绝保存为 MP4，请重试")
+                    return false
+                }
 
                 // Content-Length 可疑检测：1KB~100KB 可能是错误页面而非真实媒体
                 if (!isAudioStreamDirect && contentLength in 1..100_000) {
