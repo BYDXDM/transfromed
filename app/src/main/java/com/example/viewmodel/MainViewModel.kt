@@ -66,6 +66,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _parseEndpoints = MutableStateFlow(loadParseEndpoints())
     val parseEndpoints: StateFlow<List<ParseEndpointConfig>> = _parseEndpoints.asStateFlow()
 
+    // ===== 视频下载偏好：B站画质 / SESSDATA =====
+    private val _videoQuality = MutableStateFlow(prefs.getInt("video_quality", 64))
+    val videoQuality: StateFlow<Int> = _videoQuality.asStateFlow()
+
+    private val _biliSessdata = MutableStateFlow(prefs.getString("bili_sessdata", "") ?: "")
+    val biliSessdata: StateFlow<String> = _biliSessdata.asStateFlow()
+
+    fun setVideoQuality(quality: Int) {
+        _videoQuality.value = quality
+        prefs.edit().putInt("video_quality", quality).apply()
+    }
+
+    fun setBiliSessdata(sessdata: String) {
+        _biliSessdata.value = sessdata
+        prefs.edit().putString("bili_sessdata", sessdata).apply()
+        AppLogger.log(getApplication(), "B站 SESSDATA 已${if (sessdata.isBlank()) "清空（未登录画质）" else "更新（高画质）"}", tag = "设置")
+    }
+
     init {
         val database = AppDatabase.getDatabase(application)
         repository = ConversionRepository(database.conversionHistoryDao())

@@ -12,6 +12,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import com.example.transfer.convertMp4ToAudio
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -51,6 +52,25 @@ object NetworkDownloader {
     // 用户可在"个性化设置"中开关/增删；由 MainViewModel 持久化并推送至此。
     @Volatile
     private var configuredParseEndpoints: List<ParseEndpointConfig> = defaultParseEndpoints()
+
+    // ===== 视频下载偏好（B站画质 / SESSDATA），由 MainViewModel 推送 =====
+    private val VALID_QUALITIES = setOf(16, 32, 64, 80)
+    @Volatile
+    private var preferredQuality: Int = 64
+    @Volatile
+    private var sessdataCookie: String? = null
+
+    /** quality: B站 qn 值 16=360P 32=480P 64=720P 80=1080P；sessdata 可为空（未登录画质）。 */
+    fun updateVideoPreferences(quality: Int, sessdata: String?) {
+        preferredQuality = if (quality in VALID_QUALITIES) quality else 64
+        sessdataCookie = sessdata?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    /** B站请求 Cookie 头：buvid3 必带（防 412），SESSDATA 可选（解锁高画质）。 */
+    internal fun biliCookieHeader(buvid3: String): String = buildString {
+        append("buvid3=").append(buvid3)
+        sessdataCookie?.let { append("; SESSDATA=").append(it) }
+    }
 
     /** 内置默认换源接口（与历史硬编码列表一致，保证既有行为不变）。 */
     fun defaultParseEndpoints(): List<ParseEndpointConfig> = listOf(
@@ -250,6 +270,9 @@ object NetworkDownloader {
         var totalBytesRead = 0L
         var lastReportTime = 0L
         var lastReportPct = -1f
+        var speedWindowStart = 0L
+        var speedWindowBytes = 0L
+        var speedBytesPerSec = 0f
 
         while (input.read(buffer).also { bytesRead = it } != -1) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
@@ -266,13 +289,24 @@ object NetworkDownloader {
                 val now = System.currentTimeMillis()
 
                 if (now - lastReportTime >= 100L || Math.abs(totalPct - lastReportPct) >= 0.005f || filePct >= 1.0f) {
+                    // 速度窗口：约每 800ms 刷新一次 MB/s
+                    if (speedWindowStart == 0L) {
+                        speedWindowStart = now
+                        speedWindowBytes = totalBytesRead
+                    } else if (now - speedWindowStart >= 800) {
+                        val secs = (now - speedWindowStart) / 1000f
+                        if (secs > 0) speedBytesPerSec = (totalBytesRead - speedWindowBytes) / secs
+                        speedWindowStart = now
+                        speedWindowBytes = totalBytesRead
+                    }
                     lastReportTime = now
                     lastReportPct = totalPct
                     val mbRead = String.format(java.util.Locale.getDefault(), "%.1f MB", totalBytesRead / (1024f * 1024f))
                     val totalMb = if (contentLength > 0) String.format(java.util.Locale.getDefault(), " / %.1f MB", contentLength / (1024f * 1024f)) else ""
+                    val speedText = if (speedBytesPerSec > 0) String.format(java.util.Locale.getDefault(), " · %.1f MB/s", speedBytesPerSec / (1024f * 1024f)) else ""
                     val pctInt = (totalPct * 100).toInt().coerceIn(0, 100)
 
-                    onProgress(totalPct, "$statusPrefix: $pctInt% ($mbRead$totalMb)")
+                    onProgress(totalPct, "$statusPrefix: $pctInt% ($mbRead$totalMb)$speedText")
                 }
             }
         }
@@ -409,6 +443,55 @@ object NetworkDownloader {
         }
     }
 
+
+    // ===== B站分P信息 =====
+    data class BiliPage(val cid: Long, val page: Int, val part: String)
+
+    /** 从 view API JSON 中解析分P列表（纯逻辑，可单测）。 */
+    internal fun parseBilibiliPages(json: String): List<BiliPage> {
+        return try {
+            val root = JSONObject(json)
+            if (root.optInt("code") != 0) return emptyList()
+            val pages = root.optJSONObject("data")?.optJSONArray("pages") ?: return emptyList()
+            (0 until pages.length()).mapNotNull { i ->
+                val p = pages.optJSONObject(i) ?: return@mapNotNull null
+                val cid = p.optLong("cid")
+                if (cid <= 0) return@mapNotNull null
+                BiliPage(
+                    cid = cid,
+                    page = p.optInt("page", i + 1),
+                    part = p.optString("part").ifBlank { "P${i + 1}" }
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /** 获取B站视频分P列表（多P视频用于分P选择；失败返回空列表）。 */
+    suspend fun fetchBilibiliPages(context: Context, rawUrl: String): List<BiliPage> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val cleanUrl = sanitizeUrlInput(rawUrl)
+                if (!isPublicHttpUrl(cleanUrl)) return@withContext emptyList()
+                val bvid = extractBvid(context, resolveFinalUrl(cleanUrl)) ?: return@withContext emptyList()
+                val buvid3 = fetchBuvid3(context)
+                val req = Request.Builder()
+                    .url("https://api.bilibili.com/x/web-interface/view?bvid=$bvid")
+                    .header("User-Agent", USER_AGENT)
+                    .header("Referer", "https://www.bilibili.com/")
+                    .header("Cookie", biliCookieHeader(buvid3))
+                    .build()
+                client.newCall(req).execute().use { res ->
+                    if (!res.isSuccessful) return@withContext emptyList()
+                    parseBilibiliPages(res.body?.string() ?: "")
+                }
+            } catch (e: Exception) {
+                AppLogger.log(context, "【B站】获取分P列表失败: ${e.message}")
+                emptyList()
+            }
+        }
+    }
 
     // 歌曲搜索：统一返回结果列表（videoId 存 bvid 或 yt videoId, source 标记来源）
     data class SongResult(
@@ -580,11 +663,12 @@ object NetworkDownloader {
     }
 
     suspend fun downloadVideo(
-        context: Context, 
-        url: String, 
-        outputUri: Uri, 
+        context: Context,
+        url: String,
+        outputUri: Uri,
         isMp3: Boolean,
-        onProgress: ((Float, String) -> Unit)? = null
+        onProgress: ((Float, String) -> Unit)? = null,
+        cid: Long? = null
     ): Boolean {
         return withContext(Dispatchers.IO) {
             try {
@@ -600,7 +684,7 @@ object NetworkDownloader {
                 }
 
                 if (inputUrl.contains("bilibili.com") || inputUrl.contains("b23.tv") || inputUrl.contains("BV") || inputUrl.contains("av")) {
-                    return@withContext downloadBilibiliMultiSource(context, inputUrl, outputUri, isMp3, onProgress)
+                    return@withContext downloadBilibiliMultiSource(context, inputUrl, outputUri, isMp3, onProgress, cid)
                 } else if (inputUrl.contains("twitter.com") || inputUrl.contains("x.com")) {
                     return@withContext downloadTwitterMultiSource(context, inputUrl, outputUri, isMp3, onProgress)
                 } else if (inputUrl.contains("youtube.com") || inputUrl.contains("youtu.be") || inputUrl.contains("yt.be")) {
@@ -749,14 +833,15 @@ object NetworkDownloader {
     // 1. 哔哩哔哩 (Bilibili) 官方接口解析与备用方案
     // ============================================================================
     private suspend fun downloadBilibiliMultiSource(
-        context: Context, 
-        rawUrl: String, 
-        outputUri: Uri, 
+        context: Context,
+        rawUrl: String,
+        outputUri: Uri,
         isMp3: Boolean,
-        onProgress: ((Float, String) -> Unit)? = null
+        onProgress: ((Float, String) -> Unit)? = null,
+        cid: Long? = null
     ): Boolean {
         onProgress?.invoke(0.08f, "正在解析B站视频信息 (8%)...")
-        AppLogger.log(context, "【B站】开始解析链接: $rawUrl")
+        AppLogger.log(context, "【B站】开始解析链接: $rawUrl${cid?.let { " (指定分P cid=$it)" } ?: ""}")
         val resolvedUrl = resolveFinalUrl(rawUrl)
 
         val bvid = extractBvid(context, resolvedUrl)
@@ -770,7 +855,8 @@ object NetworkDownloader {
         var isAudioStreamDirect = false
 
         // 方案 1: 网页HTML window.__playinfo__ 正则解析 (主方案)
-        if (bvid != null) {
+        // 注：网页 playinfo 只对应 P1；用户明确选择了分P（cid != null）时跳过
+        if (bvid != null && cid == null) {
             AppLogger.log(context, "【B站-方案1】尝试网页 HTML window.__playinfo__ 直接提取...")
             try {
                 val buvid3 = fetchBuvid3(context)
@@ -778,7 +864,7 @@ object NetworkDownloader {
                     .url("https://www.bilibili.com/video/$bvid/")
                     .header("User-Agent", USER_AGENT)
                     .header("Referer", "https://www.bilibili.com/")
-                    .header("Cookie", "buvid3=$buvid3; CURRENT_FNVAL=16")
+                    .header("Cookie", biliCookieHeader(buvid3) + "; CURRENT_FNVAL=16")
                     .build()
                 client.newCall(pageReq).execute().use { pageRes ->
                     val html = pageRes.body?.string() ?: ""
@@ -829,32 +915,35 @@ object NetworkDownloader {
             AppLogger.log(context, "【B站-方案2】切换至 Bilibili 官方 API 接口 (view & playurl)...")
             try {
                 val buvid3 = fetchBuvid3(context)
+                val cookieHeader = biliCookieHeader(buvid3)
                 val infoRequest = Request.Builder()
                     .url("https://api.bilibili.com/x/web-interface/view?bvid=$bvid")
                     .header("User-Agent", USER_AGENT)
                     .header("Referer", "https://www.bilibili.com/")
-                    .header("Cookie", "buvid3=$buvid3")
+                    .header("Cookie", cookieHeader)
                     .build()
 
                 client.newCall(infoRequest).execute().use { infoResponse ->
                     val infoJson = JSONObject(infoResponse.body?.string() ?: "")
                     if (infoJson.optInt("code") == 0) {
-                        val cid = infoJson.getJSONObject("data").getLong("cid")
-                        
+                        // 用户指定分P时使用指定 cid，否则取默认 P1
+                        val effectiveCid = cid ?: infoJson.getJSONObject("data").getLong("cid")
+
                         // 2a. Standard playurl API
                         // fnval=0 requests a muxed MP4 (video + audio), which is
                         // the safest format for MP4 downloads and avoids silent DASH files.
+                        val quality = preferredQuality
                         val playUrlRequests = if (isMp3) {
                             // DASH exposes a direct audio track; avoid downloading a full MP4.
                             listOf(
-                                "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$cid&qn=64&fnval=16",
-                                "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$cid&qn=64&fnval=0"
+                                "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$effectiveCid&qn=$quality&fnval=16",
+                                "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$effectiveCid&qn=$quality&fnval=0"
                             )
                         } else {
                             // Only request muxed MP4 for video downloads. A video-only DASH
                             // track must never be saved as an apparently valid silent MP4.
                             listOf(
-                                "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$cid&qn=64&fnval=0"
+                                "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$effectiveCid&qn=$quality&fnval=0"
                             )
                         }
                         for (playUrl in playUrlRequests) {
@@ -863,7 +952,7 @@ object NetworkDownloader {
                                 .url(playUrl)
                                 .header("User-Agent", USER_AGENT)
                                 .header("Referer", "https://www.bilibili.com/")
-                                .header("Cookie", "buvid3=$buvid3")
+                                .header("Cookie", cookieHeader)
                                 .build()
                             client.newCall(playUrlReq).execute().use { playRes ->
                                 val playJson = JSONObject(playRes.body?.string() ?: "")
