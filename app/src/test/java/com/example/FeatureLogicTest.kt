@@ -107,13 +107,15 @@ class FeatureLogicTest {
         val tasks = listOf(
             DownloadTask(1, "https://www.bilibili.com/video/BV1xx411c7m9", false, "video.mp4", "content://tree/folder", null),
             DownloadTask(2, "https://www.bilibili.com/video/BV1xx411c7m9", true, "audio.m4a", "content://tree/folder", 100),
-            DownloadTask(3, "https://example.com/a.mp4", false, "a.mp4", "content://tree/folder", null, DownloadStatus.FAILED, 0.5f, "下载失败(已重试3次)")
+            DownloadTask(3, "https://example.com/a.mp4", false, "a.mp4", "content://tree/folder", null, DownloadStatus.FAILED, 0.5f, "下载失败(已重试3次)"),
+            DownloadTask(4, "https://example.com/c.mp4", false, "c.mp4", "content://tree/folder", null, DownloadStatus.DONE, 1f, "下载完成", "content://document/c.mp4")
         )
         val restored = TransferHub.deserializeTasks(TransferHub.serializeTasks(tasks))
-        assertEquals(3, restored.size)
+        assertEquals(4, restored.size)
         assertEquals(tasks[0], restored[0])
         assertEquals(100L, restored[1].cid)
         assertEquals(DownloadStatus.FAILED, restored[2].status)
+        assertEquals("content://document/c.mp4", restored[3].outputUri)
     }
 
     @Test

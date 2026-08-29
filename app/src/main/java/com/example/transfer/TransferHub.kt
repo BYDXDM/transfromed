@@ -22,7 +22,8 @@ data class DownloadTask(
     val cid: Long? = null,  // B站分P cid（null=默认P1）
     val status: DownloadStatus = DownloadStatus.WAITING,
     val progress: Float = 0f,
-    val message: String = "等待下载..."
+    val message: String = "等待下载...",
+    val outputUri: String? = null // 成功后写入，供"打开文件"使用
 )
 
 /** 一次批量转换任务（EPUB/MP4/WebP），由前台服务在后台执行。 */
@@ -173,6 +174,11 @@ object TransferHub {
         updateTask(id) { it.copy(message = message) }
     }
 
+    internal fun updateTaskOutput(id: Long, outputUri: String) {
+        updateTask(id) { it.copy(outputUri = outputUri) }
+        persistTasks()
+    }
+
     /** 设置/更新进度卡任务；name 为 null 表示只更新进度与文本。 */
     internal fun setActive(name: String?, progress: Float?, text: String?) {
         val current = _activeTask.value ?: ActiveTask(name ?: "", progress ?: 0f, text ?: "")
@@ -271,6 +277,7 @@ object TransferHub {
                     .put("status", t.status.name)
                     .put("progress", t.progress.toDouble())
                     .put("message", t.message)
+                    .put("outputUri", t.outputUri ?: JSONObject.NULL)
             )
         }
         return arr.toString()
@@ -297,7 +304,8 @@ object TransferHub {
                         DownloadStatus.WAITING
                     },
                     progress = o.optDouble("progress", 0.0).toFloat(),
-                    message = o.optString("message")
+                    message = o.optString("message"),
+                    outputUri = if (o.has("outputUri") && !o.isNull("outputUri")) o.optString("outputUri") else null
                 )
             }.map {
                 // 进程被杀时下载中的任务状态不可信，重置为等待

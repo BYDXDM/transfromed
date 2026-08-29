@@ -121,6 +121,9 @@ class DownloadService : Service() {
             cid = task.cid,
             onProgress = onProgress
         )
+        if (success) {
+            TransferHub.updateTaskOutput(task.id, docFile.uri.toString())
+        }
         repository.insert(
             ConversionHistory(
                 fileName = task.fileName,
@@ -130,7 +133,7 @@ class DownloadService : Service() {
             )
         )
         if (success) {
-            showCompletionNotification("下载完成", task.fileName)
+            showCompletionNotification("下载完成", task.fileName, docFile.uri, task.isAudio)
             Toast.makeText(this, "✅ ${task.fileName} 下载完成", Toast.LENGTH_SHORT).show()
         }
         return success
@@ -271,15 +274,35 @@ class DownloadService : Service() {
         notifySafely(NOTIF_PROGRESS_ID, notification)
     }
 
-    private fun showCompletionNotification(title: String, text: String) {
-        val notification =
+    private fun showCompletionNotification(
+        title: String,
+        text: String,
+        outputUri: Uri? = null,
+        isAudio: Boolean = false
+    ) {
+        val builder =
             NotificationCompat.Builder(this, CHANNEL_DONE)
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
                 .setContentTitle(title)
                 .setContentText(text)
                 .setAutoCancel(true)
-                .build()
-        notifySafely(completionNotifId++, notification)
+        // 让用户自主选择是否立即打开文件：点击通知本体或"打开"按钮均可
+        if (outputUri != null) {
+            val mime = if (isAudio) "audio/*" else "video/*"
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(outputUri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val openPendingIntent = PendingIntent.getActivity(
+                this,
+                outputUri.hashCode(),
+                viewIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.setContentIntent(openPendingIntent)
+            builder.addAction(0, "打开文件", openPendingIntent)
+        }
+        notifySafely(completionNotifId++, builder.build())
     }
 
     private fun notifySafely(id: Int, notification: Notification) {

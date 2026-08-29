@@ -26,6 +26,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
@@ -65,6 +67,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
@@ -82,6 +85,7 @@ import com.example.ui.SectionCardShape
 import com.example.ui.SectionHeader
 import com.example.ui.LogViewerDialog
 import com.example.ui.AppearanceSettingsSheet
+import com.example.ui.openFile
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.ThemeMode
 import com.example.viewmodel.AppIconType
@@ -145,6 +149,8 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     // 剪贴板检测到的候选链接
     var clipboardSuggestion by remember { mutableStateOf<String?>(null) }
     var notifPermissionAsked by remember { mutableStateOf(false) }
+    // 首次下载尚未选文件夹时挂起的请求，选完自动继续
+    var pendingDownload by remember { mutableStateOf<PendingDownload?>(null) }
 
     // 歌曲搜索下载状态
     var songQuery by remember { mutableStateOf("") }
@@ -388,7 +394,17 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
             queueFolderUri = it
             queueFolderName = DocumentFile.fromTreeUri(context, it)?.name ?: "已选择文件夹"
             viewModel.saveOutputDir("dlqueue", it.toString())
-            Toast.makeText(context, "已选择下载文件夹，可批量添加视频", Toast.LENGTH_SHORT).show()
+            // 首次下载：文件夹选好后自动继续挂起的下载
+            pendingDownload?.let { pending ->
+                if (TransferHub.enqueueDownload(pending.url, pending.isAudio, pending.fileName, it.toString(), pending.cid)) {
+                    DownloadService.start(context)
+                    ensureNotificationPermission()
+                    Toast.makeText(context, "✅ 已加入队列: ${pending.fileName}", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "该链接已在队列中", Toast.LENGTH_SHORT).show()
+                }
+            }
+            pendingDownload = null
         }
     }
 
@@ -399,6 +415,27 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
             val uri = Uri.parse(savedDir)
             queueFolderUri = uri
             queueFolderName = DocumentFile.fromTreeUri(context, uri)?.name ?: "已选择文件夹"
+        }
+    }
+
+    fun startDownload(isAudio: Boolean) {
+        val ext = if (isAudio) "m4a" else "mp4"
+        val targetName = suggestFileName(
+            videoUrl, ext,
+            fileNameTitle(customVideoTitle, fetchedVideoTitle, selectedPage, biliPages)
+        )
+        val folder = queueFolderUri
+        if (folder == null) {
+            // 首次下载：挂起请求，文件夹选好后自动继续
+            pendingDownload = PendingDownload(videoUrl, isAudio, selectedPage?.cid, targetName)
+            queueFolderPicker.launch(null)
+            Toast.makeText(context, "选择下载文件夹后将自动开始下载", Toast.LENGTH_LONG).show()
+        } else if (TransferHub.enqueueDownload(videoUrl, isAudio, targetName, folder.toString(), selectedPage?.cid)) {
+            DownloadService.start(context)
+            ensureNotificationPermission()
+            Toast.makeText(context, "✅ 已加入队列: $targetName", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "该链接已在队列中", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -734,6 +771,37 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     SectionHeader(icon = Icons.Default.CloudDownload, title = "视频解析下载 (B站 / X / YouTube)")
 
                     // ---- 歌曲搜索下载 ----
+                    fun doSongSearch() {
+                        if (songQuery.isBlank()) {
+                            songToast = "请输入歌名或歌手"
+                            return
+                        }
+                        if (isSongSearching) return
+                        coroutineScope.launch {
+                            isSongSearching = true
+                            try {
+                                // B站优先（国内直连、无需代理），搜不到再退回 YouTube
+                                var r = NetworkDownloader.searchBilibiliMusic(context, songQuery.trim(), 8)
+                                var usedSource = "B站"
+                                if (r.isEmpty()) {
+                                    r = NetworkDownloader.searchYouTubeMusic(context, songQuery.trim(), 5)
+                                    usedSource = "YouTube"
+                                }
+                                if (r.isNotEmpty()) {
+                                    songResults = r
+                                    showSongResults = true
+                                    songToast = "共 ${r.size} 个结果（来源: $usedSource），点选下载音频 (M4A)"
+                                } else {
+                                    songToast = "B站/YouTube 都未搜到歌曲，请换歌名或检查网络"
+                                }
+                            } catch (e: Exception) {
+                                songToast = "搜索失败: ${e.message}"
+                            } finally {
+                                isSongSearching = false
+                            }
+                        }
+                    }
+
                     OutlinedTextField(
                         value = songQuery,
                         onValueChange = { songQuery = it },
@@ -748,6 +816,8 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                         },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = { doSongSearch() }),
                         trailingIcon = {
                             Row {
                                 if (songQuery.isNotEmpty()) {
@@ -756,35 +826,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                     }
                                 }
                                 IconButton(
-                                    onClick = {
-                                        if (songQuery.isNotBlank() && !isSongSearching) {
-                                            coroutineScope.launch {
-                                                isSongSearching = true
-                                                try {
-                                                    // B站优先（国内直连、无需代理），搜不到再退回 YouTube
-                                                    var r = NetworkDownloader.searchBilibiliMusic(context, songQuery.trim(), 8)
-                                                    var usedSource = "B站"
-                                                    if (r.isEmpty()) {
-                                                        r = NetworkDownloader.searchYouTubeMusic(context, songQuery.trim(), 5)
-                                                        usedSource = "YouTube"
-                                                    }
-                                                    if (r.isNotEmpty()) {
-                                                        songResults = r
-                                                        showSongResults = true
-                                                        songToast = "共 ${r.size} 个结果（来源: $usedSource），点选下载音频 (M4A)"
-                                                    } else {
-                                                        songToast = "B站/YouTube 都未搜到歌曲，请换歌名或检查网络"
-                                                    }
-                                                } catch (e: Exception) {
-                                                    songToast = "搜索失败: ${e.message}"
-                                                } finally {
-                                                    isSongSearching = false
-                                                }
-                                            }
-                                        } else if (songQuery.isBlank()) {
-                                            songToast = "请输入歌名或歌手"
-                                        }
-                                    },
+                                    onClick = { doSongSearch() },
                                     enabled = !isSongSearching
                                 ) {
                                     if (isSongSearching) {
@@ -796,7 +838,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                             }
                         },
                         supportingText = {
-                            Text(if (songToast.isNotEmpty()) songToast else "B站优先、YouTube兜底，自动搜索可点选直接下载音频 (M4A)")
+                            Text(if (songToast.isNotEmpty()) songToast else "B站优先、YouTube兜底，输入后按回车或点搜索键")
                         }
                     )
 
@@ -978,23 +1020,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Button(
-                            onClick = {
-                                val targetName = suggestFileName(
-                                    videoUrl, "mp4",
-                                    fileNameTitle(customVideoTitle, fetchedVideoTitle, selectedPage, biliPages)
-                                )
-                                val folder = queueFolderUri
-                                if (folder == null) {
-                                    queueFolderPicker.launch(null)
-                                    Toast.makeText(context, "请先选择下载文件夹，然后再次点击下载", Toast.LENGTH_LONG).show()
-                                } else if (TransferHub.enqueueDownload(videoUrl, false, targetName, folder.toString(), selectedPage?.cid)) {
-                                    DownloadService.start(context)
-                                    ensureNotificationPermission()
-                                    Toast.makeText(context, "✅ 已加入队列: $targetName", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "该链接已在队列中", Toast.LENGTH_SHORT).show()
-                                }
-                            },
+                            onClick = { startDownload(false) },
                             enabled = videoUrl.isNotEmpty() && !isConverting,
                             modifier = Modifier.weight(1f)
                         ) {
@@ -1003,23 +1029,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                             Text("下载视频 (MP4)", maxLines = 1)
                         }
                         Button(
-                            onClick = {
-                                val targetName = suggestFileName(
-                                    videoUrl, "m4a",
-                                    fileNameTitle(customVideoTitle, fetchedVideoTitle, selectedPage, biliPages)
-                                )
-                                val folder = queueFolderUri
-                                if (folder == null) {
-                                    queueFolderPicker.launch(null)
-                                    Toast.makeText(context, "请先选择下载文件夹，然后再次点击下载", Toast.LENGTH_LONG).show()
-                                } else if (TransferHub.enqueueDownload(videoUrl, true, targetName, folder.toString(), selectedPage?.cid)) {
-                                    DownloadService.start(context)
-                                    ensureNotificationPermission()
-                                    Toast.makeText(context, "✅ 已加入队列: $targetName", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "该链接已在队列中", Toast.LENGTH_SHORT).show()
-                                }
-                            },
+                            onClick = { startDownload(true) },
                             enabled = videoUrl.isNotEmpty() && !isConverting,
                             modifier = Modifier.weight(1f)
                         ) {
@@ -1245,6 +1255,26 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
 
                                         // 操作按钮
                                         Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                            // 下载完成：让用户自主选择是否打开文件
+                                            if (task.status == DownloadStatus.DONE && !task.outputUri.isNullOrEmpty()) {
+                                                IconButton(
+                                                    onClick = {
+                                                        openFile(
+                                                            context,
+                                                            task.outputUri,
+                                                            if (task.isAudio) "下载音频(M4A)" else "下载视频(MP4)"
+                                                        )
+                                                    },
+                                                    modifier = Modifier.size(32.dp)
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.OpenInNew,
+                                                        contentDescription = "打开文件",
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
                                             if (task.status == DownloadStatus.FAILED) {
                                                 IconButton(
                                                     onClick = {
@@ -1445,3 +1475,11 @@ private fun fileNameTitle(
     val base = customTitle.ifBlank { fetchedTitle } ?: return null
     return if (selectedPage != null && pages.size > 1) "$base P${selectedPage.page}" else base
 }
+
+/** 首次下载时文件夹未选定，先挂起请求，选完文件夹自动继续。 */
+private data class PendingDownload(
+    val url: String,
+    val isAudio: Boolean,
+    val cid: Long?,
+    val fileName: String
+)
