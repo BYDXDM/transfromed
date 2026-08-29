@@ -217,6 +217,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     val bgSettings by viewModel.bgSettings.collectAsStateWithLifecycle()
     val currentIcon by viewModel.currentIcon.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    val parseEndpoints by viewModel.parseEndpoints.collectAsStateWithLifecycle()
     var selectedHistoryIds by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var showBgSettingsSheet by remember { mutableStateOf(false) }
     var showLogDialog by remember { mutableStateOf(false) }
@@ -397,6 +398,11 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
 
     LaunchedEffect(Unit) {
         viewModel.syncRetention(context)
+    }
+
+    // 将用户配置的第三方解析接口（含开关状态）同步给下载器
+    LaunchedEffect(parseEndpoints) {
+        NetworkDownloader.updateParseEndpoints(parseEndpoints)
     }
 
     val customBgPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -947,9 +953,105 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     }
                 }
 
+                // ===== 第三方解析接口（B站音频兜底换源白名单）=====
+                var newEndpointTemplate by remember { mutableStateOf("") }
+
+                Text("第三方解析接口 (B站音频兜底)", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "官方渠道解析失败时，按顺序尝试以下开放接口。添加的接口会收到视频链接，请只添加信任的节点；模板支持 {bvid} 与 {url} 占位符。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                parseEndpoints.forEach { ep ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    ep.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1
+                                )
+                                Text(
+                                    ep.template,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                )
+                            }
+                            Switch(
+                                checked = ep.enabled,
+                                onCheckedChange = { viewModel.setParseEndpointEnabled(ep.template, it) }
+                            )
+                            IconButton(onClick = {
+                                viewModel.removeParseEndpoint(ep.template)
+                                Toast.makeText(context, "已删除: ${ep.name}", Toast.LENGTH_SHORT).show()
+                            }) {
+                                Icon(
+                                    Icons.Default.DeleteOutline,
+                                    contentDescription = "删除接口",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = newEndpointTemplate,
+                        onValueChange = { newEndpointTemplate = it },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("添加接口模板") },
+                        placeholder = { Text("https://api.example.com/p?url={url}") },
+                        singleLine = true
+                    )
+                    TextButton(
+                        onClick = {
+                            if (viewModel.addParseEndpoint(newEndpointTemplate)) {
+                                newEndpointTemplate = ""
+                                Toast.makeText(context, "接口已添加并启用", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(
+                                    context,
+                                    "添加失败：需为 https 公网接口且包含 {url} 或 {bvid} 占位符",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        },
+                        enabled = newEndpointTemplate.isNotBlank()
+                    ) {
+                        Text("添加")
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = {
+                        viewModel.resetParseEndpoints()
+                        newEndpointTemplate = ""
+                        Toast.makeText(context, "已恢复默认解析接口", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("恢复默认接口")
+                    }
+                }
+
                 if (bgSettings.type != BackgroundType.DEFAULT) {
                     Text("效果参数调节", style = MaterialTheme.typography.titleMedium)
-
                     Text("背景暗化度: ${(bgSettings.dimAlpha * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
                     Slider(
                         value = bgSettings.dimAlpha,

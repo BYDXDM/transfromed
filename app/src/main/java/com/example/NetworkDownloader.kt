@@ -19,6 +19,17 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.TimeUnit
 
+/**
+ * 第三方解析接口配置（B站音频兜底换源）。
+ * template 中可使用占位符 {bvid}（B站视频ID）与 {url}（视频页地址），
+ * 下载时按启用顺序逐一尝试。
+ */
+data class ParseEndpointConfig(
+    val name: String,
+    val template: String,
+    val enabled: Boolean = true
+)
+
 object NetworkDownloader {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -35,6 +46,32 @@ object NetworkDownloader {
     private var cachedBuvid3: String? = null
     private var buvid3FetchTime: Long = 0L
     private const val BUVID3_CACHE_TTL_MS = 30 * 60 * 1000L // 30 分钟有效期
+
+    // ===== 第三方解析接口（可配置白名单，B站音频兜底换源）=====
+    // 用户可在"个性化设置"中开关/增删；由 MainViewModel 持久化并推送至此。
+    @Volatile
+    private var configuredParseEndpoints: List<ParseEndpointConfig> = defaultParseEndpoints()
+
+    /** 内置默认换源接口（与历史硬编码列表一致，保证既有行为不变）。 */
+    fun defaultParseEndpoints(): List<ParseEndpointConfig> = listOf(
+        ParseEndpointConfig("api.injahow.cn", "https://api.injahow.cn/bparse/?bv={bvid}&format=mp4"),
+        ParseEndpointConfig("api.xinrance.com", "https://api.xinrance.com/api/bilibili?url={url}"),
+        ParseEndpointConfig("api.vvhan.com", "https://api.vvhan.com/api/bilibili?url={url}"),
+        ParseEndpointConfig("tenapi.cn", "https://tenapi.cn/v2/bilibili?url={url}"),
+        ParseEndpointConfig("api.pearktrue.cn", "https://api.pearktrue.cn/api/bilibili/?url={url}")
+    )
+
+    /** 用主界面配置的启用列表替换内置列表。 */
+    fun updateParseEndpoints(endpoints: List<ParseEndpointConfig>) {
+        configuredParseEndpoints = endpoints.filter { it.enabled }
+    }
+
+    internal fun enabledParseApiTemplates(): List<String> =
+        configuredParseEndpoints.map { it.template }
+
+    /** 将模板中的 {bvid}/{url} 占位符替换为实际值（bvid 为空时替换为空串，与既有行为一致）。 */
+    internal fun buildParseApiUrl(template: String, bvid: String?, pageUrl: String): String =
+        template.replace("{bvid}", bvid ?: "").replace("{url}", pageUrl)
 
     /**
      * 通过 B站 spi 接口获取真实的 buvid3 cookie 值。
@@ -876,17 +913,14 @@ object NetworkDownloader {
             return false
         }
 
-        // 方案 3: 开放多渠道第三方换源 API（仅 MP3 的最后回退）
+        // 方案 3: 开放多渠道第三方换源 API（仅 MP3 的最后回退；接口列表可在个性化设置中配置）
         if (isMp3 && mediaUrl.isNullOrEmpty()) {
             AppLogger.log(context, "【B站-方案3】尝试开放第三方多渠道换源解析...")
             val videoTargetUrl = if (bvid != null) "https://www.bilibili.com/video/$bvid" else resolvedUrl
-            val openApis = listOf(
-                "https://api.injahow.cn/bparse/?bv=${bvid ?: ""}&format=mp4",
-                "https://api.xinrance.com/api/bilibili?url=$videoTargetUrl",
-                "https://api.vvhan.com/api/bilibili?url=$videoTargetUrl",
-                "https://tenapi.cn/v2/bilibili?url=$videoTargetUrl",
-                "https://api.pearktrue.cn/api/bilibili/?url=$videoTargetUrl"
-            )
+            val openApis = enabledParseApiTemplates().map { buildParseApiUrl(it, bvid, videoTargetUrl) }
+            if (openApis.isEmpty()) {
+                AppLogger.log(context, "【B站-方案3】未启用任何第三方解析接口，已跳过")
+            }
             for (apiUrl in openApis) {
                 try {
                     val parseReq = Request.Builder()

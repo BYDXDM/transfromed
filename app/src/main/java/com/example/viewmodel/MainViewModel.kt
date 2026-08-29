@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.NetworkDownloader
+import com.example.ParseEndpointConfig
 import com.example.R
 import com.example.data.AppDatabase
 import com.example.data.ConversionHistory
@@ -19,6 +21,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
+import org.json.JSONArray
+import org.json.JSONObject
 
 enum class BackgroundType {
     DEFAULT,
@@ -57,6 +61,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _themeMode = MutableStateFlow(loadThemeMode())
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
+
+    // ===== 第三方解析接口白名单（B站音频兜底换源）=====
+    private val _parseEndpoints = MutableStateFlow(loadParseEndpoints())
+    val parseEndpoints: StateFlow<List<ParseEndpointConfig>> = _parseEndpoints.asStateFlow()
 
     init {
         val database = AppDatabase.getDatabase(application)
@@ -168,6 +176,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val savedTheme = loadThemeMode()
         _themeMode.value = savedTheme
 
+        _parseEndpoints.value = loadParseEndpoints()
+
         if (!savedBg.customUriString.isNullOrEmpty()) {
             viewModelScope.launch(Dispatchers.IO) {
                 try {
@@ -195,6 +205,87 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearOutputDir(type: String) {
         prefs.edit().remove("last_dir_$type").apply()
+    }
+
+    // ===== 第三方解析接口：加载 / 持久化 / 增删改 =====
+
+    private fun loadParseEndpoints(): List<ParseEndpointConfig> {
+        val json = prefs.getString("parse_endpoints", null)
+            ?: return NetworkDownloader.defaultParseEndpoints()
+        return try {
+            val arr = JSONArray(json)
+            val list = (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val template = o.optString("template")
+                if (template.isBlank()) {
+                    null
+                } else {
+                    ParseEndpointConfig(
+                        name = o.optString("name").ifBlank { "接口" },
+                        template = template,
+                        enabled = o.optBoolean("enabled", true)
+                    )
+                }
+            }
+            if (list.isEmpty()) NetworkDownloader.defaultParseEndpoints() else list
+        } catch (e: Exception) {
+            NetworkDownloader.defaultParseEndpoints()
+        }
+    }
+
+    private fun persistParseEndpoints(list: List<ParseEndpointConfig>) {
+        val arr = JSONArray()
+        list.forEach { ep ->
+            arr.put(
+                JSONObject()
+                    .put("name", ep.name)
+                    .put("template", ep.template)
+                    .put("enabled", ep.enabled)
+            )
+        }
+        prefs.edit().putString("parse_endpoints", arr.toString()).apply()
+    }
+
+    fun setParseEndpointEnabled(template: String, enabled: Boolean) {
+        _parseEndpoints.value = _parseEndpoints.value.map {
+            if (it.template == template) it.copy(enabled = enabled) else it
+        }
+        persistParseEndpoints(_parseEndpoints.value)
+    }
+
+    /**
+     * 添加自定义接口模板。要求：https、包含 {url} 或 {bvid} 占位符、
+     * 域名为公网地址（用替换占位符后的样例 URL 做安全校验）、不与现有条目重复。
+     */
+    fun addParseEndpoint(rawTemplate: String): Boolean {
+        val template = rawTemplate.trim()
+        if (!template.startsWith("https://", ignoreCase = true)) return false
+        if (!template.contains("{url}") && !template.contains("{bvid}")) return false
+        if (_parseEndpoints.value.any { it.template.equals(template, ignoreCase = true) }) return false
+
+        val sample = template
+            .replace("{url}", "https://www.bilibili.com/video/BV1xx411c7m9")
+            .replace("{bvid}", "BV1xx411c7m9")
+        if (!NetworkDownloader.isPublicHttpUrl(sample)) return false
+
+        val host = Regex("""^https://([A-Za-z0-9.-]+(?::\d+)?)""", RegexOption.IGNORE_CASE)
+            .find(template)?.groupValues?.get(1)?.lowercase()
+            ?: return false
+
+        _parseEndpoints.value = _parseEndpoints.value +
+                ParseEndpointConfig(name = host, template = template, enabled = true)
+        persistParseEndpoints(_parseEndpoints.value)
+        return true
+    }
+
+    fun removeParseEndpoint(template: String) {
+        _parseEndpoints.value = _parseEndpoints.value.filter { it.template != template }
+        persistParseEndpoints(_parseEndpoints.value)
+    }
+
+    fun resetParseEndpoints() {
+        _parseEndpoints.value = NetworkDownloader.defaultParseEndpoints()
+        persistParseEndpoints(_parseEndpoints.value)
     }
 
     fun resetAppearance(context: Context) {
