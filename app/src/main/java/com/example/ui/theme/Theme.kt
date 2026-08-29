@@ -1,15 +1,11 @@
 package com.example.ui.theme
 
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 
 enum class ThemeMode(val displayName: String) {
     SYSTEM("跟随系统"),
@@ -17,52 +13,65 @@ enum class ThemeMode(val displayName: String) {
     DARK("深色模式")
 }
 
-private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFFD0BCFF),
-    onPrimary = Color(0xFF381E72),
-    primaryContainer = Color(0xFF4F378B),
-    onPrimaryContainer = Color(0xFFEADDFF),
-    secondary = Color(0xFFCCC2DC),
-    onSecondary = Color(0xFF332D41),
-    secondaryContainer = Color(0xFF4A4458),
-    onSecondaryContainer = Color(0xFFE8DEF8),
-    tertiary = Color(0xFFEFB8C8),
-    onTertiary = Color(0xFF492532),
-    tertiaryContainer = Color(0xFF633B48),
-    onTertiaryContainer = Color(0xFFFFD8E4),
-    background = Color(0xFF1C1B1F),
-    onBackground = Color(0xFFE6E1E5),
-    surface = Color(0xFF1C1B1F),
-    onSurface = Color(0xFFE6E1E5),
-    surfaceVariant = Color(0xFF49454F),
-    onSurfaceVariant = Color(0xFFCAC4D0)
+// 统一品牌配色（靛蓝-紫罗兰），不再跟随系统动态取色，
+// 保证自定义背景/图标等个性化功能在不同设备上呈现一致。
+private val LightColorScheme = lightColorScheme(
+    primary = Color(0xFF4B55C4),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFFDFE0FF),
+    onPrimaryContainer = Color(0xFF00105C),
+    secondary = Color(0xFF5C5D72),
+    onSecondary = Color(0xFFFFFFFF),
+    secondaryContainer = Color(0xFFE1E0F9),
+    onSecondaryContainer = Color(0xFF191A2C),
+    tertiary = Color(0xFF78536B),
+    onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFFFFD8EA),
+    onTertiaryContainer = Color(0xFF2E1126),
+    error = Color(0xFFBA1A1A),
+    onError = Color(0xFFFFFFFF),
+    errorContainer = Color(0xFFFFDAD6),
+    onErrorContainer = Color(0xFF410002),
+    background = Color(0xFFFBF8FF),
+    onBackground = Color(0xFF1B1B21),
+    surface = Color(0xFFFBF8FF),
+    onSurface = Color(0xFF1B1B21),
+    surfaceVariant = Color(0xFFE3E1EC),
+    onSurfaceVariant = Color(0xFF46464F),
+    outline = Color(0xFF777680),
+    outlineVariant = Color(0xFFC7C5D0)
 )
 
-private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF6750A4),
-    onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFEADDFF),
-    onPrimaryContainer = Color(0xFF21005D),
-    secondary = Color(0xFF625B71),
-    onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFE8DEF8),
-    onSecondaryContainer = Color(0xFF1D192B),
-    tertiary = Color(0xFF7D5260),
-    onTertiary = Color(0xFFFFFFFF),
-    tertiaryContainer = Color(0xFFFFD8E4),
-    onTertiaryContainer = Color(0xFF31111D),
-    background = Color(0xFFFFFBFE),
-    onBackground = Color(0xFF1C1B1F),
-    surface = Color(0xFFFFFBFE),
-    onSurface = Color(0xFF1C1B1F),
-    surfaceVariant = Color(0xFFE7E0EC),
-    onSurfaceVariant = Color(0xFF49454F)
+private val DarkColorScheme = darkColorScheme(
+    primary = Color(0xFFBCC2FF),
+    onPrimary = Color(0xFF172380),
+    primaryContainer = Color(0xFF323FA9),
+    onPrimaryContainer = Color(0xFFDFE0FF),
+    secondary = Color(0xFFC5C4DD),
+    onSecondary = Color(0xFF2E2F42),
+    secondaryContainer = Color(0xFF444559),
+    onSecondaryContainer = Color(0xFFE1E0F9),
+    tertiary = Color(0xFFE7BAD9),
+    onTertiary = Color(0xFF44263B),
+    tertiaryContainer = Color(0xFF5D3C52),
+    onTertiaryContainer = Color(0xFFFFD8EA),
+    error = Color(0xFFFFB4AB),
+    onError = Color(0xFF690005),
+    errorContainer = Color(0xFF93000A),
+    onErrorContainer = Color(0xFFFFDAD6),
+    background = Color(0xFF131318),
+    onBackground = Color(0xFFE4E1E9),
+    surface = Color(0xFF131318),
+    onSurface = Color(0xFFE4E1E9),
+    surfaceVariant = Color(0xFF46464F),
+    onSurfaceVariant = Color(0xFFC7C5D0),
+    outline = Color(0xFF90909A),
+    outlineVariant = Color(0xFF46464F)
 )
 
 @Composable
 fun MyApplicationTheme(
     themeMode: ThemeMode = ThemeMode.SYSTEM,
-    dynamicColor: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val darkTheme = when (themeMode) {
@@ -71,15 +80,7 @@ fun MyApplicationTheme(
         ThemeMode.DARK -> true
     }
 
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
+    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
 
     MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
 }
-

@@ -11,6 +11,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -77,9 +78,64 @@ object NetworkDownloader {
         }
     }
 
+    /**
+     * 请求前置安全校验：仅允许 http/https，且目标 host 不得为
+     * localhost / 环回 / 私有 / 链路本地 / 保留地址（含 DNS 解析后的 IP 判断）。
+     * 用户输入的任意 URL 与解析得到的媒体直链都必须经过此检查。
+     */
+    fun isPublicHttpUrl(url: String): Boolean {
+        val parsed = try {
+            url.toHttpUrlOrNull()
+        } catch (e: Exception) {
+            null
+        } ?: return false
+
+        if (parsed.scheme !in setOf("http", "https")) return false
+        val host = parsed.host
+        if (host.isBlank()) return false
+
+        // 字符串层面的常见内网主机名 / 保留段拦截（先拦 localhost，避免无谓 DNS）
+        val hostLower = host.lowercase()
+        if (hostLower == "localhost" || hostLower.endsWith(".localhost") || hostLower.endsWith(".local") || hostLower == "0.0.0.0") {
+            return false
+        }
+
+        // DNS 解析后逐个 IP 校验，防止域名指向内网的绕过
+        return try {
+            val addresses = java.net.InetAddress.getAllByName(host)
+            if (addresses.isEmpty()) return false
+            addresses.all { addr ->
+                val isPrivateV4 = run {
+                    val b = addr.address
+                    b.size == 4 && (
+                        b[0] == 0.toByte() ||                       // 0.0.0.0/8 "this network"
+                        b[0] == 10.toByte() ||                      // 10.0.0.0/8
+                        (b[0] == 100.toByte() && b[1] in 64..127) ||// 100.64.0.0/10 CGNAT
+                        (b[0] == 127.toByte()) ||                   // 127.0.0.0/8
+                        (b[0] == 169.toByte() && b[1] == 254.toByte()) || // 169.254.0.0/16
+                        (b[0] == 172.toByte() && b[1] in 16..31) || // 172.16.0.0/12
+                        (b[0] == 192.toByte() && b[1] == 168.toByte())    // 192.168.0.0/16
+                        )
+                }
+                val isUlaV6 = addr.address.size == 16 &&
+                        ((addr.address[0].toInt() and 0xFF) in 0xFC..0xFD) // fc00::/7 ULA
+                !addr.isLoopbackAddress &&
+                        !addr.isSiteLocalAddress &&
+                        !addr.isLinkLocalAddress &&
+                        !addr.isAnyLocalAddress &&
+                        !addr.isMulticastAddress &&
+                        !isPrivateV4 &&
+                        !isUlaV6
+            }
+        } catch (e: Exception) {
+            // 无法解析的 host 一律拒绝，宁可误杀不可放行内网
+            false
+        }
+    }
+
     fun sanitizeUrlInput(rawInput: String): String {
         if (rawInput.isBlank()) return ""
-        
+
         val cleaned = rawInput.trim()
             .replace("https：//", "https://")
             .replace("http：//", "http://")
@@ -106,10 +162,10 @@ object NetworkDownloader {
             return "https://www.bilibili.com/video/${bvMatch.value}"
         }
 
-        // 3. Direct AV match (e.g. av123456)
-        val avMatch = Regex("""av\d+""", RegexOption.IGNORE_CASE).find(cleaned)
+        // 3. Direct AV match (e.g. av123456)。前后不能是字母数字，避免 "sav123" 之类误判
+        val avMatch = Regex("""(?<![a-zA-Z0-9])av(\d+)""", RegexOption.IGNORE_CASE).find(cleaned)
         if (avMatch != null) {
-            return "https://www.bilibili.com/video/${avMatch.value}"
+            return "https://www.bilibili.com/video/av${avMatch.groupValues[1]}"
         }
 
         // 4. Domain match without scheme
@@ -203,6 +259,11 @@ object NetworkDownloader {
             try {
                 val cleanUrl = sanitizeUrlInput(rawUrl)
                 if (cleanUrl.isBlank()) return@withContext null
+                // 安全校验：任意用户输入的 URL 抓取标题前必须检查目标是否公网 http(s)
+                if (!isPublicHttpUrl(cleanUrl)) {
+                    AppLogger.w(context, "标题抓取目标未通过安全校验: $cleanUrl", "视频解析")
+                    return@withContext null
+                }
 
                 // 1. YouTube Title
                 val ytId = extractYouTubeVideoId(cleanUrl)
@@ -494,6 +555,13 @@ object NetworkDownloader {
                 AppLogger.log(context, "智能分析视频链接: '$url' -> '$inputUrl'")
                 onProgress?.invoke(0.05f, "正在分析视频链接 (5%)...")
 
+                // 安全校验：拒绝非 http(s) 与指向本机/内网/保留地址的链接
+                if (!isPublicHttpUrl(inputUrl)) {
+                    AppLogger.w(context, "链接未通过安全校验（非 http/https 或指向内网/保留地址）: $inputUrl", "视频解析")
+                    onProgress?.invoke(0f, "错误: 链接不安全或无效（仅支持公网 http/https 地址）")
+                    return@withContext false
+                }
+
                 if (inputUrl.contains("bilibili.com") || inputUrl.contains("b23.tv") || inputUrl.contains("BV") || inputUrl.contains("av")) {
                     return@withContext downloadBilibiliMultiSource(context, inputUrl, outputUri, isMp3, onProgress)
                 } else if (inputUrl.contains("twitter.com") || inputUrl.contains("x.com")) {
@@ -558,7 +626,7 @@ object NetworkDownloader {
         val bvidMatch = bvidRegex.find(resolvedUrl)
         if (bvidMatch != null) return bvidMatch.value
 
-        val avRegex = Regex("av(\\d+)", RegexOption.IGNORE_CASE)
+        val avRegex = Regex("""(?<![a-zA-Z0-9])av(\d+)""", RegexOption.IGNORE_CASE)
         val avMatch = avRegex.find(resolvedUrl)
         if (avMatch != null) {
             val aid = avMatch.groupValues[1]
@@ -1304,6 +1372,12 @@ object NetworkDownloader {
         isAudioStreamDirect: Boolean,
         onProgress: ((Float, String) -> Unit)? = null
     ): Boolean {
+        // 安全校验：解析得到的媒体直链同样必须指向公网 http(s) 地址
+        if (!isPublicHttpUrl(mediaUrl)) {
+            AppLogger.w(context, "媒体地址未通过安全校验，拒绝下载: $mediaUrl", "视频解析")
+            onProgress?.invoke(0f, "错误: 媒体地址不安全，已拒绝下载")
+            return false
+        }
         AppLogger.log(context, "连接媒体服务地址: $mediaUrl")
         // 优化：添加完整的请求头以兼容各平台的防盗链机制
         val downloadReq = Request.Builder()
@@ -1347,97 +1421,124 @@ object NetworkDownloader {
                     onProgress?.invoke(0f, "警告: 响应体仅 ${contentLength / 1024}KB，可能非媒体文件")
                 }
 
+                if (isMp3 && contentType?.substringBefore(';')?.trim()?.lowercase() == "audio/mpeg") {
+                    // 场景：直链本身就是真 MP3 文件，直接落盘保存原始字节，
+                    // 不再经过 MediaExtractor+MediaMuxer 重封装（MP3 轨道并非所有设备都支持封装进 MP4）。
+                    AppLogger.log(context, "检测到 audio/mpeg 直链，直接保存原始 MP3")
+                    context.contentResolver.openOutputStream(outputUri)?.use { out ->
+                        body.byteStream().use { input ->
+                            copyStreamWithProgress(
+                                input = input,
+                                output = out,
+                                contentLength = contentLength,
+                                basePct = 0.15f,
+                                pctRange = 0.85f,
+                                statusPrefix = "正在下载 MP3",
+                                onProgress = onProgress
+                            )
+                        }
+                    }
+                    onProgress?.invoke(1.0f, "MP3 保存完成 (100%)")
+                    return true
+                }
+
                 if (isMp3 && !isAudioStreamDirect) {
                     // 场景：下载完整视频流，然后提取音频
                     val tempFile = File(context.cacheDir, "temp_download_${System.currentTimeMillis()}.mp4")
-                    tempFile.outputStream().use { fileOut ->
-                        body.byteStream().use { input ->
-                            copyStreamWithProgress(
-                                input = input,
-                                output = fileOut,
-                                contentLength = contentLength,
-                                basePct = 0.15f,
-                                pctRange = 0.70f,
-                                statusPrefix = "正在下载媒体源",
-                                onProgress = onProgress
-                            )
-                        }
-                    }
-                    AppLogger.log(context, "视频文件下载完毕，正在提取音频为MP3文件...")
-                    onProgress?.invoke(0.85f, "视频下载完毕，开始音频提取 (85%)...")
-                    
-                    val success = convertMp4ToAudio(
-                        context = context, 
-                        inputUri = Uri.fromFile(tempFile), 
-                        outputUri = outputUri,
-                        onProgress = onProgress,
-                        basePct = 0.85f,
-                        pctRange = 0.15f,
-                        taskLabel = "提取MP3音频"
-                    )
-                    tempFile.delete()
-                    if (success) {
-                        onProgress?.invoke(1.0f, "音频处理保存完成 (100%)")
-                        AppLogger.log(context, "媒体转码与保存完全成功!")
-                    } else {
-                        AppLogger.log(context, "音频提取转码过程失败")
-                    }
-                    success
-                } else if (isMp3 && isAudioStreamDirect) {
-                    // 场景：B站/YouTube 等纯音频 DASH 流（m4a/aac）。
-                    // 修复：先下载到临时文件，再通过 MediaMuxer 封装为合法的 M4A/MP4 容器，
-                    // 避免直接保存原始 DASH 分段导致播放器无法识别。
-                    AppLogger.log(context, "检测到纯音频流(m4a/aac)，先下载再封装为 M4A 容器...")
-                    val tempFile = File(context.cacheDir, "temp_audio_${System.currentTimeMillis()}.m4a")
-                    tempFile.outputStream().use { fileOut ->
-                        body.byteStream().use { input ->
-                            copyStreamWithProgress(
-                                input = input,
-                                output = fileOut,
-                                contentLength = contentLength,
-                                basePct = 0.15f,
-                                pctRange = 0.70f,
-                                statusPrefix = "正在下载纯音频",
-                                onProgress = onProgress
-                            )
-                        }
-                    }
-                    AppLogger.log(context, "纯音频下载完毕，正在封装为 M4A 容器...")
-                    onProgress?.invoke(0.85f, "音频下载完毕，开始封装 (85%)...")
-
-                    val success = convertMp4ToAudio(
-                        context = context,
-                        inputUri = Uri.fromFile(tempFile),
-                        outputUri = outputUri,
-                        onProgress = onProgress,
-                        basePct = 0.85f,
-                        pctRange = 0.15f,
-                        taskLabel = "封装M4A音频"
-                    )
-                    tempFile.delete()
-                    if (success) {
-                        onProgress?.invoke(1.0f, "M4A 音频封装完成 (100%)")
-                        AppLogger.log(context, "纯音频流已成功封装为合法的 M4A 容器")
-                        true
-                    } else {
-                        AppLogger.log(context, "M4A 封装失败，尝试直接保存原始流...")
-                        // fallback: 直接保存原始流
-                        context.contentResolver.openOutputStream(outputUri)?.use { out ->
-                            tempFile.inputStream().use { input ->
+                    try {
+                        tempFile.outputStream().use { fileOut ->
+                            body.byteStream().use { input ->
                                 copyStreamWithProgress(
                                     input = input,
-                                    output = out,
-                                    contentLength = tempFile.length(),
-                                    basePct = 0.85f,
-                                    pctRange = 0.15f,
-                                    statusPrefix = "直接保存原始音频",
+                                    output = fileOut,
+                                    contentLength = contentLength,
+                                    basePct = 0.15f,
+                                    pctRange = 0.70f,
+                                    statusPrefix = "正在下载媒体源",
                                     onProgress = onProgress
                                 )
                             }
                         }
-                        onProgress?.invoke(1.0f, "原始音频已直接保存 (100%)")
-                        AppLogger.log(context, "已直接保存原始音频流（可能部分播放器不兼容）")
-                        true
+                        AppLogger.log(context, "视频文件下载完毕，正在提取音频为M4A文件...")
+                        onProgress?.invoke(0.85f, "视频下载完毕，开始音频封装 (85%)...")
+
+                        val success = convertMp4ToAudio(
+                            context = context,
+                            inputUri = Uri.fromFile(tempFile),
+                            outputUri = outputUri,
+                            onProgress = onProgress,
+                            basePct = 0.85f,
+                            pctRange = 0.15f,
+                            taskLabel = "封装M4A音频"
+                        )
+                        if (success) {
+                            onProgress?.invoke(1.0f, "音频处理保存完成 (100%)")
+                            AppLogger.log(context, "媒体转码与保存完全成功!")
+                        } else {
+                            AppLogger.log(context, "音频提取转码过程失败")
+                        }
+                        success
+                    } finally {
+                        tempFile.delete()
+                    }
+                } else if (isMp3 && isAudioStreamDirect) {
+                    // 场景：B站/YouTube 等纯音频 DASH 流（m4a/aac）。
+                    // 先下载到临时文件，再通过 MediaMuxer 封装为合法的 M4A/MP4 容器，
+                    // 避免直接保存原始 DASH 分段导致播放器无法识别。
+                    AppLogger.log(context, "检测到纯音频流(m4a/aac)，先下载再封装为 M4A 容器...")
+                    val tempFile = File(context.cacheDir, "temp_audio_${System.currentTimeMillis()}.m4a")
+                    try {
+                        tempFile.outputStream().use { fileOut ->
+                            body.byteStream().use { input ->
+                                copyStreamWithProgress(
+                                    input = input,
+                                    output = fileOut,
+                                    contentLength = contentLength,
+                                    basePct = 0.15f,
+                                    pctRange = 0.70f,
+                                    statusPrefix = "正在下载纯音频",
+                                    onProgress = onProgress
+                                )
+                            }
+                        }
+                        AppLogger.log(context, "纯音频下载完毕，正在封装为 M4A 容器...")
+                        onProgress?.invoke(0.85f, "音频下载完毕，开始封装 (85%)...")
+
+                        val success = convertMp4ToAudio(
+                            context = context,
+                            inputUri = Uri.fromFile(tempFile),
+                            outputUri = outputUri,
+                            onProgress = onProgress,
+                            basePct = 0.85f,
+                            pctRange = 0.15f,
+                            taskLabel = "封装M4A音频"
+                        )
+                        if (success) {
+                            onProgress?.invoke(1.0f, "M4A 音频封装完成 (100%)")
+                            AppLogger.log(context, "纯音频流已成功封装为合法的 M4A 容器")
+                            true
+                        } else {
+                            AppLogger.log(context, "M4A 封装失败，尝试直接保存原始流...")
+                            // fallback: 直接保存原始流
+                            context.contentResolver.openOutputStream(outputUri)?.use { out ->
+                                tempFile.inputStream().use { input ->
+                                    copyStreamWithProgress(
+                                        input = input,
+                                        output = out,
+                                        contentLength = tempFile.length(),
+                                        basePct = 0.85f,
+                                        pctRange = 0.15f,
+                                        statusPrefix = "直接保存原始音频",
+                                        onProgress = onProgress
+                                    )
+                                }
+                            }
+                            onProgress?.invoke(1.0f, "原始音频已直接保存 (100%)")
+                            AppLogger.log(context, "已直接保存原始音频流（可能部分播放器不兼容）")
+                            true
+                        }
+                    } finally {
+                        tempFile.delete()
                     }
                 } else {
                     context.contentResolver.openOutputStream(outputUri)?.use { out ->

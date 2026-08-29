@@ -23,7 +23,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -190,7 +189,7 @@ fun LogViewerDialog(
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    LogLevel.values().forEach { level ->
+                    LogLevel.entries.forEach { level ->
                         val isSelected = selectedLevel == level
                         FilterChip(
                             selected = isSelected,
@@ -332,21 +331,22 @@ fun LogViewerDialog(
 
 @Composable
 fun LogItemRow(log: LogEntry) {
+    // 全部使用主题容器色，深浅色模式下都保持协调可读
     val levelColor = when (log.level) {
-        LogLevel.ERROR -> MaterialTheme.colorScheme.error
-        LogLevel.SUCCESS -> Color(0xFF2E7D32)
-        LogLevel.WARN -> Color(0xFFE65100)
-        LogLevel.INFO -> MaterialTheme.colorScheme.primary
-        LogLevel.DEBUG -> MaterialTheme.colorScheme.secondary
+        LogLevel.ERROR -> MaterialTheme.colorScheme.onErrorContainer
+        LogLevel.SUCCESS -> MaterialTheme.colorScheme.onTertiaryContainer
+        LogLevel.WARN -> MaterialTheme.colorScheme.onSecondaryContainer
+        LogLevel.INFO -> MaterialTheme.colorScheme.onPrimaryContainer
+        LogLevel.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
         LogLevel.ALL -> MaterialTheme.colorScheme.onSurface
     }
 
     val levelBgColor = when (log.level) {
         LogLevel.ERROR -> MaterialTheme.colorScheme.errorContainer
-        LogLevel.SUCCESS -> Color(0xFFE8F5E9)
-        LogLevel.WARN -> Color(0xFFFFF3E0)
+        LogLevel.SUCCESS -> MaterialTheme.colorScheme.tertiaryContainer
+        LogLevel.WARN -> MaterialTheme.colorScheme.secondaryContainer
         LogLevel.INFO -> MaterialTheme.colorScheme.primaryContainer
-        LogLevel.DEBUG -> MaterialTheme.colorScheme.secondaryContainer
+        LogLevel.DEBUG -> MaterialTheme.colorScheme.surfaceVariant
         LogLevel.ALL -> MaterialTheme.colorScheme.surface
     }
 

@@ -138,7 +138,7 @@ object AppLogger {
     fun parseLogLine(id: Long, line: String): LogEntry {
         try {
             var level = LogLevel.INFO
-            for (l in LogLevel.values()) {
+            for (l in LogLevel.entries) {
                 if (l != LogLevel.ALL && line.contains("[${l.name}]")) {
                     level = l
                     break

@@ -137,7 +137,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val pkgName = context.packageName
 
                 // Enable the selected icon, disable ALL others including MainActivity
-                AppIconType.values().forEach { icon ->
+                AppIconType.entries.forEach { icon ->
                     val state = if (icon == iconType) {
                         PackageManager.COMPONENT_ENABLED_STATE_ENABLED
                     } else {
@@ -201,7 +201,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val defaultBg = BackgroundSettings(BackgroundType.DEFAULT_CUSTOM)
         _bgSettings.value = defaultBg
         _themeMode.value = ThemeMode.SYSTEM
-        _currentIcon.value = AppIconType.ORIGINAL
 
         prefs.edit()
             .putString("bg_type", defaultBg.type.name)
@@ -209,8 +208,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .putFloat("bg_dim", defaultBg.dimAlpha)
             .putFloat("card_alpha", defaultBg.cardAlpha)
             .putString("theme_mode", ThemeMode.SYSTEM.name)
-            .putString("app_icon_type", AppIconType.DEFAULT.name)
             .apply()
+
+        // 通过 setAppIcon 统一处理状态、持久化与实际组件切换，避免三者不一致
+        setAppIcon(context, AppIconType.DEFAULT)
 
         AppLogger.log(context, "已全部恢复默认外观与主题")
     }

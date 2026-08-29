@@ -17,12 +17,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -31,7 +28,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -46,12 +42,9 @@ import com.example.viewmodel.BackgroundType
 import com.example.viewmodel.BackgroundSettings
 import com.example.viewmodel.AppIconType
 import com.example.data.ConversionHistory
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -65,6 +58,18 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Title
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Queue
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Downloading
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.outlined.Schedule
 import android.content.ClipboardManager
 import android.content.ClipData
 import androidx.compose.foundation.rememberScrollState
@@ -82,14 +87,16 @@ import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.InputStream
-import java.io.OutputStream
 import java.util.zip.ZipInputStream
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import java.nio.ByteBuffer
-import android.app.AlertDialog
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import java.util.concurrent.atomic.AtomicLong
 
 // ===== 下载队列数据模型 =====
@@ -98,11 +105,11 @@ enum class DownloadStatus { WAITING, RUNNING, DONE, FAILED }
 data class DownloadTask(
     val id: Long,
     val url: String,
-    val isMp3: Boolean,
+    val isAudio: Boolean,   // true=音频(M4A) false=视频(MP4)
     val fileName: String,
-    var status: DownloadStatus,
-    var progress: Float,
-    var message: String
+    val status: DownloadStatus,
+    val progress: Float,
+    val message: String
 )
 
 class MainActivity : ComponentActivity() {
@@ -121,6 +128,38 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// 统一的功能分区卡片：大圆角 + 图标徽章标题
+private val SectionCardShape = RoundedCornerShape(20.dp)
+
+@Composable
+fun SectionHeader(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewModel()) {
@@ -132,6 +171,8 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     var fetchedVideoTitle by remember { mutableStateOf<String?>(null) }
     var isFetchingVideoTitle by remember { mutableStateOf(false) }
     var customVideoTitle by remember { mutableStateOf("") }
+    // 记录已成功抓取过标题的 URL，避免重复请求（选歌、二次粘贴等场景直接复用）
+    var titleFetchedForUrl by remember { mutableStateOf("") }
 
     // 歌曲搜索下载状态
     var songQuery by remember { mutableStateOf("") }
@@ -144,21 +185,25 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(videoUrl) {
-        if (videoUrl.isNotBlank()) {
-            isFetchingVideoTitle = true
-            fetchedVideoTitle = null
-            customVideoTitle = ""
-            val title = NetworkDownloader.fetchVideoTitle(context, videoUrl)
-            if (title != null) {
-                fetchedVideoTitle = title
-                customVideoTitle = title
-            }
-            isFetchingVideoTitle = false
-        } else {
+        if (videoUrl.isBlank()) {
             fetchedVideoTitle = null
             customVideoTitle = ""
             isFetchingVideoTitle = false
+            return@LaunchedEffect
         }
+        // 同一链接已抓到过标题则不再请求
+        if (videoUrl == titleFetchedForUrl && fetchedVideoTitle != null) return@LaunchedEffect
+        // 防抖：等待输入停顿后再抓取，避免每敲一个字符就发一次网络请求
+        kotlinx.coroutines.delay(700)
+        if (videoUrl.isBlank() || (videoUrl == titleFetchedForUrl && fetchedVideoTitle != null)) return@LaunchedEffect
+        isFetchingVideoTitle = true
+        val title = NetworkDownloader.fetchVideoTitle(context, videoUrl)
+        if (title != null) {
+            fetchedVideoTitle = title
+            customVideoTitle = title
+            titleFetchedForUrl = videoUrl
+        }
+        isFetchingVideoTitle = false
     }
     var currentJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var currentTaskName by remember { mutableStateOf("") }
@@ -205,12 +250,6 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     val queueWorkerJob = remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val isConverting = currentJob != null || queueRunning
 
-    fun removeQueueItem(id: Long) {
-        downloadQueue = downloadQueue.filter {
-            it.id != id || it.status == DownloadStatus.RUNNING
-        }
-    }
-
     fun clearQueue() {
         downloadQueue = downloadQueue.filter { it.status == DownloadStatus.RUNNING }
     }
@@ -233,7 +272,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     }
                     // Create output file in selected folder
                     val docDir = DocumentFile.fromTreeUri(context, folderUri)
-                    val mimeType = if (nextTask.isMp3) "audio/mpeg" else "video/mp4"
+                    val mimeType = if (nextTask.isAudio) "audio/mp4" else "video/mp4"
                     val docFile = docDir?.createFile(mimeType, nextTask.fileName)
                     if (docFile == null) {
                         withContext(Dispatchers.Main) {
@@ -278,14 +317,14 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                             context = context,
                             url = nextTask.url,
                             outputUri = docFile.uri,
-                            isMp3 = nextTask.isMp3,
+                            isAudio = nextTask.isAudio,
                             onProgress = combinedProgress
                         )
                         val resultStatus = if (success) DownloadStatus.DONE else DownloadStatus.FAILED
                         val resultMsg = if (success) "下载完成" else "下载失败(已重试3次)"
                         viewModel.addHistory(
                             nextTask.fileName,
-                            if (nextTask.isMp3) "下载视频(MP3)" else "下载视频(MP4)",
+                            if (nextTask.isAudio) "下载音频(M4A)" else "下载视频(MP4)",
                             success,
                             if (success) docFile.uri.toString() else null
                         )
@@ -317,18 +356,23 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                         taskProgress = 0f
                         taskProgressText = ""
                     }
+                    // 竞态保护：worker 退出的同时若有新任务入队（入队时 queueRunning 仍为 true），
+                    // 任务会永久滞留 WAITING，这里兜底重启 worker
+                    if (downloadQueue.any { it.status == DownloadStatus.WAITING }) {
+                        startQueueWorker()
+                    }
                 }
             }
         }
         queueWorkerJob.value = job
     }
 
-    fun addToQueue(url: String, isMp3: Boolean, fileName: String) {
+    fun addToQueue(url: String, isAudio: Boolean, fileName: String) {
         val id = queueTaskIdCounter.incrementAndGet()
         val task = DownloadTask(
             id = id,
             url = url,
-            isMp3 = isMp3,
+            isAudio = isAudio,
             fileName = fileName,
             status = DownloadStatus.WAITING,
             progress = 0f,
@@ -464,7 +508,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     val fileName = getFileName(context, inputUri)
                     val baseName = fileName.substringBeforeLast(".")
                     val docDir = DocumentFile.fromTreeUri(context, treeUri)
-                    val docFile = docDir?.createFile("audio/mpeg", "$baseName.mp3")
+                    val docFile = docDir?.createFile("audio/mp4", "$baseName.m4a")
                     val fileBasePct = index.toFloat() / total
                     val filePctRange = 1f / total
 
@@ -485,7 +529,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                 taskLabel = "音频提取"
                             )
                         }
-                        viewModel.addHistory(fileName, "MP4转MP3", success, if (success) docFile.uri.toString() else null)
+                        viewModel.addHistory(fileName, "MP4转M4A", success, if (success) docFile.uri.toString() else null)
                         if (!success) hasError = true
                     } else {
                         hasError = true
@@ -591,110 +635,6 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
             startWebpConvert(android.net.Uri.parse(last))
         } else {
             webpSaver.launch(null)
-        }
-    }
-
-    val videoSaverMp4 = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("video/mp4")) { uri ->
-        uri?.let {
-            currentJob = coroutineScope.launch {
-                currentTaskName = "下载网络视频 (MP4)"
-                taskProgress = 0f
-                taskProgressText = "正在准备连接服务器..."
-                val fileName = suggestFileName(videoUrl, "mp4", customVideoTitle.ifBlank { fetchedVideoTitle })
-                try {
-                    val success = doVideoDownloadWithRetry(
-                        context = context, 
-                        url = videoUrl, 
-                        outputUri = it, 
-                        isMp3 = false,
-                        onProgress = updateProgressOnMain
-                    )
-                    if (isActive) {
-                        viewModel.addHistory(fileName, "下载视频(MP4)", success, if (success) it.toString() else null)
-                        if (success) {
-                            taskProgress = 1.0f
-                            Toast.makeText(context, "保存成功: $fileName", Toast.LENGTH_SHORT).show()
-                        } else {
-                            errorMessage = "网络视频 MP4 下载失败达3次！"
-                            showErrorDialog = true
-                        }
-                    }
-                } finally {
-                    currentJob = null
-                }
-            }
-        }
-    }
-
-    val videoSaverMp3 = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/mpeg")) { uri ->
-        uri?.let {
-            currentJob = coroutineScope.launch {
-                currentTaskName = "下载网络视频 (MP3)"
-                taskProgress = 0f
-                taskProgressText = "正在准备连接服务器..."
-                val fileName = suggestFileName(videoUrl, "mp3", customVideoTitle.ifBlank { fetchedVideoTitle })
-                try {
-                    val success = doVideoDownloadWithRetry(
-                        context = context, 
-                        url = videoUrl, 
-                        outputUri = it, 
-                        isMp3 = true,
-                        onProgress = updateProgressOnMain
-                    )
-                    if (isActive) {
-                        viewModel.addHistory(fileName, "下载视频(MP3)", success, if (success) it.toString() else null)
-                        if (success) {
-                            taskProgress = 1.0f
-                            Toast.makeText(context, "保存成功: $fileName", Toast.LENGTH_SHORT).show()
-                        } else {
-                            errorMessage = "网络视频 MP3 下载失败达3次！"
-                            showErrorDialog = true
-                        }
-                    }
-                } finally {
-                    currentJob = null
-                }
-            }
-        }
-    }
-
-    val videoFolderSaverMp4 = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
-        treeUri?.let {
-            currentJob = coroutineScope.launch {
-                currentTaskName = "下载网络视频 (自动按标题保存)"
-                taskProgress = 0f
-                taskProgressText = "正在准备创建文件..."
-                try {
-                    val docDir = DocumentFile.fromTreeUri(context, treeUri)
-                    val targetTitle = customVideoTitle.ifBlank { fetchedVideoTitle ?: "download" }
-                    val targetFileName = NetworkDownloader.sanitizeFileName(targetTitle, "mp4")
-                    val docFile = docDir?.createFile("video/mp4", targetFileName)
-                    if (docFile != null) {
-                        val success = doVideoDownloadWithRetry(
-                            context = context,
-                            url = videoUrl,
-                            outputUri = docFile.uri,
-                            isMp3 = false,
-                            onProgress = updateProgressOnMain
-                        )
-                        if (isActive) {
-                            viewModel.addHistory(targetFileName, "下载视频(MP4)", success, if (success) docFile.uri.toString() else null)
-                            if (success) {
-                                taskProgress = 1.0f
-                                Toast.makeText(context, "按标题成功保存: $targetFileName", Toast.LENGTH_SHORT).show()
-                            } else {
-                                errorMessage = "网络视频下载失败达3次！"
-                                showErrorDialog = true
-                            }
-                        }
-                    } else {
-                        errorMessage = "无法在目标文件夹创建文件，请检查存储权限"
-                        showErrorDialog = true
-                    }
-                } finally {
-                    currentJob = null
-                }
-            }
         }
     }
 
@@ -816,7 +756,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    ThemeMode.values().forEach { mode ->
+                    ThemeMode.entries.forEach { mode ->
                         val isSelected = themeMode == mode
                         FilterChip(
                             selected = isSelected,
@@ -842,7 +782,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    AppIconType.values().forEach { icon ->
+                    AppIconType.entries.forEach { icon ->
                         Card(
                             modifier = Modifier
                                 .weight(1f)
@@ -1107,11 +1047,36 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("transformed", style = MaterialTheme.typography.headlineMedium)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Transformed",
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "多格式转换 · 视频解析下载",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    IconButton(onClick = { showBgSettingsSheet = true }) {
+                        Icon(
+                            Icons.Default.Wallpaper,
+                            contentDescription = "个性化外观设置",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    IconButton(onClick = { showLogDialog = true }) {
+                        Icon(
+                            Icons.Default.Article,
+                            contentDescription = "查看运行日志",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                     IconButton(onClick = {
                         val nextMode = when (themeMode) {
                             ThemeMode.SYSTEM -> ThemeMode.LIGHT
@@ -1127,37 +1092,16 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                 ThemeMode.DARK -> Icons.Default.DarkMode
                                 ThemeMode.SYSTEM -> Icons.Default.BrightnessAuto
                             },
-                            contentDescription = "切换主题模式"
+                            contentDescription = "切换主题模式",
+                            tint = MaterialTheme.colorScheme.primary
                         )
-                    }
-                    OutlinedButton(
-                        onClick = { showBgSettingsSheet = true },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Wallpaper,
-                            contentDescription = "个性化外观",
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("外观设置", style = MaterialTheme.typography.labelMedium)
-                    }
-                    IconButton(onClick = { 
-                        showLogDialog = true 
-                    }) {
-                        Icon(Icons.Default.Article, contentDescription = "查看运行日志")
-                    }
-                    IconButton(onClick = { 
-                        AppLogger.clearLog(context)
-                        Toast.makeText(context, "已清理运行日志", Toast.LENGTH_SHORT).show()
-                    }) {
-                        Icon(Icons.Default.Delete, contentDescription = "清理日志")
                     }
                 }
             }
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
+                shape = SectionCardShape,
                 colors = CardDefaults.cardColors(containerColor = cardContainerColor)
             ) {
                 Column(
@@ -1165,7 +1109,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("批量 EPUB转TXT", style = MaterialTheme.typography.titleLarge)
+                    SectionHeader(icon = Icons.Default.MenuBook, title = "批量 EPUB 转 TXT")
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -1180,7 +1124,8 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                         }
                     }
                     if (epubUris.isNotEmpty()) {
-                        Text(getBatchFileSizeText(context, epubUris), style = MaterialTheme.typography.bodyMedium)
+                        val epubSizeText = remember(epubUris) { getBatchFileSizeText(context, epubUris) }
+                        Text(epubSizeText, style = MaterialTheme.typography.bodyMedium)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
@@ -1200,6 +1145,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
+                shape = SectionCardShape,
                 colors = CardDefaults.cardColors(containerColor = cardContainerColor)
             ) {
                 Column(
@@ -1207,7 +1153,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("批量 MP4转MP3", style = MaterialTheme.typography.titleLarge)
+                    SectionHeader(icon = Icons.Default.MusicNote, title = "批量 MP4 转 M4A 音频")
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -1222,7 +1168,8 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                         }
                     }
                     if (mp4Uris.isNotEmpty()) {
-                        Text(getBatchFileSizeText(context, mp4Uris), style = MaterialTheme.typography.bodyMedium)
+                        val mp4SizeText = remember(mp4Uris) { getBatchFileSizeText(context, mp4Uris) }
+                        Text(mp4SizeText, style = MaterialTheme.typography.bodyMedium)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
@@ -1242,6 +1189,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
+                shape = SectionCardShape,
                 colors = CardDefaults.cardColors(containerColor = cardContainerColor)
             ) {
                 Column(
@@ -1249,7 +1197,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("批量 WebP转JPG", style = MaterialTheme.typography.titleLarge)
+                    SectionHeader(icon = Icons.Default.Image, title = "批量 WebP 转 JPG")
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -1264,7 +1212,8 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                         }
                     }
                     if (webpUris.isNotEmpty()) {
-                        Text(getBatchFileSizeText(context, webpUris), style = MaterialTheme.typography.bodyMedium)
+                        val webpSizeText = remember(webpUris) { getBatchFileSizeText(context, webpUris) }
+                        Text(webpSizeText, style = MaterialTheme.typography.bodyMedium)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
@@ -1286,6 +1235,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
+                shape = SectionCardShape,
                 colors = CardDefaults.cardColors(containerColor = cardContainerColor)
             ) {
                 Column(
@@ -1293,14 +1243,21 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("网络视频解析与下载 (B站 / X / YouTube)", style = MaterialTheme.typography.titleLarge)
+                    SectionHeader(icon = Icons.Default.CloudDownload, title = "视频解析下载 (B站 / X / YouTube)")
 
                     // ---- 歌曲搜索下载 ----
                     OutlinedTextField(
                         value = songQuery,
                         onValueChange = { songQuery = it },
-                        label = { Text("🎵 歌曲搜索") },
+                        label = { Text("歌曲搜索") },
                         placeholder = { Text("输入歌手 / 歌名，如: 周杰伦 晴天") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.MusicNote,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         trailingIcon = {
@@ -1326,7 +1283,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                                     if (r.isNotEmpty()) {
                                                         songResults = r
                                                         showSongResults = true
-                                                        songToast = "共 ${r.size} 个结果（来源: $usedSource），点选下载 MP3"
+                                                        songToast = "共 ${r.size} 个结果（来源: $usedSource），点选下载音频 (M4A)"
                                                     } else {
                                                         songToast = "B站/YouTube 都未搜到歌曲，请换歌名或检查网络"
                                                     }
@@ -1351,7 +1308,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                             }
                         },
                         supportingText = {
-                            Text(if (songToast.isNotEmpty()) songToast else "B站优先、YouTube兜底，自动搜索可点选直接下载 MP3")
+                            Text(if (songToast.isNotEmpty()) songToast else "B站优先、YouTube兜底，自动搜索可点选直接下载音频 (M4A)")
                         }
                     )
 
@@ -1375,8 +1332,9 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                                 }
                                                 customVideoTitle = r.title
                                                 fetchedVideoTitle = r.title
+                                                titleFetchedForUrl = videoUrl
                                                 showSongResults = false
-                                                songToast = "已选择: ${r.title}，点击下方\"下载 MP3\""
+                                                songToast = "已选择: ${r.title}，点击下方\"下载音频\"即可加入队列"
                                             },
                                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                                         ) {
@@ -1486,11 +1444,13 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                             enabled = videoUrl.isNotEmpty() && !isConverting,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("📥 下载 MP4", maxLines = 1)
+                            Icon(Icons.Default.Movie, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("下载视频 (MP4)", maxLines = 1)
                         }
                         Button(
                             onClick = {
-                                val targetName = suggestFileName(videoUrl, "mp3", customVideoTitle.ifBlank { fetchedVideoTitle })
+                                val targetName = suggestFileName(videoUrl, "m4a", customVideoTitle.ifBlank { fetchedVideoTitle })
                                 if (queueFolderUri == null) {
                                     queueFolderPicker.launch(null)
                                     Toast.makeText(context, "请先选择下载文件夹，然后再次点击下载", Toast.LENGTH_LONG).show()
@@ -1502,7 +1462,9 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                             enabled = videoUrl.isNotEmpty() && !isConverting,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("📥 下载 MP3", maxLines = 1)
+                            Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("下载音频 (M4A)", maxLines = 1)
                         }
                     }
 
@@ -1536,9 +1498,14 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                 }
             }
             
-            if (isConverting) {
+            AnimatedVisibility(
+                visible = isConverting,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
+                    shape = SectionCardShape,
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = bgSettings.cardAlpha))
                 ) {
                     Column(
@@ -1632,6 +1599,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
             // ===== 下载队列面板 =====
             Card(
                 modifier = Modifier.fillMaxWidth(),
+                shape = SectionCardShape,
                 colors = CardDefaults.cardColors(containerColor = cardContainerColor)
             ) {
                 Column(
@@ -1646,9 +1614,10 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     ) {
                         val runningCount = downloadQueue.count { it.status == DownloadStatus.RUNNING }
                         val totalCount = downloadQueue.size
-                        Text(
-                            text = "📋 下载队列 ($runningCount/$totalCount)",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                        SectionHeader(
+                            icon = Icons.Default.Queue,
+                            title = "下载队列 ($runningCount/$totalCount)",
+                            modifier = Modifier.weight(1f)
                         )
                         if (downloadQueue.isNotEmpty()) {
                             TextButton(
@@ -1701,14 +1670,21 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
-                                            Text(
-                                                text = when (task.status) {
-                                                    DownloadStatus.WAITING -> "⏳"
-                                                    DownloadStatus.RUNNING -> "📥"
-                                                    DownloadStatus.DONE -> "✅"
-                                                    DownloadStatus.FAILED -> "❌"
+                                            Icon(
+                                                imageVector = when (task.status) {
+                                                    DownloadStatus.WAITING -> Icons.Outlined.Schedule
+                                                    DownloadStatus.RUNNING -> Icons.Default.Downloading
+                                                    DownloadStatus.DONE -> Icons.Default.CheckCircle
+                                                    DownloadStatus.FAILED -> Icons.Default.ErrorOutline
                                                 },
-                                                style = MaterialTheme.typography.titleMedium
+                                                contentDescription = task.status.name,
+                                                tint = when (task.status) {
+                                                    DownloadStatus.WAITING -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                    DownloadStatus.RUNNING -> MaterialTheme.colorScheme.primary
+                                                    DownloadStatus.DONE -> MaterialTheme.colorScheme.tertiary
+                                                    DownloadStatus.FAILED -> MaterialTheme.colorScheme.error
+                                                },
+                                                modifier = Modifier.size(22.dp)
                                             )
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
@@ -1718,7 +1694,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                                                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                                 )
                                                 Text(
-                                                    text = "${if (task.isMp3) "MP3" else "MP4"} · ${task.message}",
+                                                    text = "${if (task.isAudio) "M4A" else "MP4"} · ${task.message}",
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                     maxLines = 1,
@@ -1809,7 +1785,11 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("转换历史 (${filteredHistoryList.size})", style = MaterialTheme.typography.titleMedium)
+                SectionHeader(
+                    icon = Icons.Default.History,
+                    title = "转换历史 (${filteredHistoryList.size})",
+                    modifier = Modifier.weight(1f)
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (filteredHistoryList.isNotEmpty()) {
                         val allSelected = filteredHistoryList.all { history -> selectedHistoryIds.contains(history.id) }
@@ -1840,7 +1820,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf("全部", "EPUB", "MP4", "网络", "B站", "YouTube", "X").forEach { tag ->
+                listOf("全部", "EPUB", "MP4", "WebP", "网络", "B站", "YouTube", "X").forEach { tag ->
                     FilterChip(
                         selected = selectedFilterTag == tag,
                         onClick = { selectedFilterTag = tag },
@@ -1894,21 +1874,21 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HistoryItemRow(
-    history: ConversionHistory, 
-    isSelected: Boolean, 
+    history: ConversionHistory,
+    isSelected: Boolean,
     cardAlpha: Float = 0.88f,
     onSelectToggle: () -> Unit,
     onDeleteSingle: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) 
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = cardAlpha) 
-            else 
+            containerColor = if (isSelected)
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = cardAlpha)
+            else
                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = cardAlpha)
         )
     ) {
@@ -1916,10 +1896,7 @@ fun HistoryItemRow(
             modifier = Modifier
                 .padding(12.dp)
                 .fillMaxWidth()
-                .combinedClickable(
-                    onClick = { onSelectToggle() },
-                    onLongClick = { onSelectToggle() }
-                ),
+                .clickable { onSelectToggle() },
             verticalAlignment = Alignment.CenterVertically
         ) {
             Checkbox(
@@ -1938,15 +1915,28 @@ fun HistoryItemRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // 按类型上色的徽章，便于快速区分记录来源
+                    val (badgeContainer, badgeContent) = when {
+                        history.conversionType.contains("EPUB", ignoreCase = true) ->
+                            MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+                        history.conversionType.contains("M4A", ignoreCase = true) ->
+                            MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
+                        history.conversionType.contains("MP4", ignoreCase = true) ->
+                            MaterialTheme.colorScheme.tertiaryContainer to MaterialTheme.colorScheme.onTertiaryContainer
+                        history.conversionType.contains("WebP", ignoreCase = true) ->
+                            MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+                        else ->
+                            MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
+                    }
                     Surface(
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        shape = RoundedCornerShape(4.dp)
+                        color = badgeContainer,
+                        contentColor = badgeContent,
+                        shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
-                            text = history.conversionType, 
-                            style = MaterialTheme.typography.labelSmall, 
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            text = history.conversionType,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                         )
                     }
                     Text(
@@ -2027,8 +2017,9 @@ fun openFile(context: Context, uriString: String, conversionType: String) {
         val uri = Uri.parse(uriString)
         val mimeType = when {
             conversionType.contains("TXT", ignoreCase = true) -> "text/plain"
-            conversionType.contains("MP3", ignoreCase = true) -> "audio/*"
+            conversionType.contains("M4A", ignoreCase = true) || conversionType.contains("MP3", ignoreCase = true) -> "audio/*"
             conversionType.contains("MP4", ignoreCase = true) -> "video/*"
+            conversionType.contains("JPG", ignoreCase = true) -> "image/*"
             else -> context.contentResolver.getType(uri) ?: "*/*"
         }
         val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -2085,16 +2076,16 @@ suspend fun doVideoDownloadWithRetry(
     context: Context,
     url: String,
     outputUri: Uri,
-    isMp3: Boolean,
+    isAudio: Boolean,
     onProgress: ((Float, String) -> Unit)? = null
 ): Boolean {
-    val typeName = if (isMp3) "音频(MP3)" else "视频(MP4)"
+    val typeName = if (isAudio) "音频(M4A)" else "视频(MP4)"
     AppLogger.i(context, "开始解析与下载$typeName: $url", "视频解析")
     var retries = 0
     var success = false
     while (retries < 3 && !success) {
         if (!kotlinx.coroutines.currentCoroutineContext().isActive) break
-        success = NetworkDownloader.downloadVideo(context, url, outputUri, isMp3, onProgress)
+        success = NetworkDownloader.downloadVideo(context, url, outputUri, isAudio, onProgress)
         if (!success) {
             retries++
             if (retries < 3) {
