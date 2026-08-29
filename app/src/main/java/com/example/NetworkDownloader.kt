@@ -1363,7 +1363,8 @@ object NetworkDownloader {
     // ============================================================================
     // 通用媒体下载流保存与转码逻辑
     // ============================================================================
-    private suspend fun downloadStreamAndSave(
+    // internal：供单元测试直接校验 URL 门禁接线（Kotlin 测试源集可见）
+    internal suspend fun downloadStreamAndSave(
         context: Context,
         mediaUrl: String,
         referer: String,
