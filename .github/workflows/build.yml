@@ -9,7 +9,9 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-      - uses: android-actions/setup-android@v3
+      # 注：不再使用 android-actions/setup-android@v3 —— 新版 cmdline-tools 16.0
+      # 移除了 legacy "tools" 包导致该 action 全局失败；ubuntu-latest runner
+      # 已预装 Android SDK 且 licenses 已接受，AGP 会自动补齐缺失的平台组件
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
