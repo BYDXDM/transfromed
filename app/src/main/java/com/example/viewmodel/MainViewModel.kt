@@ -73,6 +73,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _biliSessdata = MutableStateFlow(prefs.getString("bili_sessdata", "") ?: "")
     val biliSessdata: StateFlow<String> = _biliSessdata.asStateFlow()
 
+    // ===== 下载代理（X/YouTube 等被墙资源经局域网代理转发）=====
+    private val _downloadProxy = MutableStateFlow(prefs.getString("download_proxy", "") ?: "")
+    val downloadProxy: StateFlow<String> = _downloadProxy.asStateFlow()
+
+    fun setDownloadProxy(spec: String) {
+        val trimmed = spec.trim()
+        _downloadProxy.value = trimmed
+        prefs.edit().putString("download_proxy", trimmed).apply()
+        NetworkDownloader.updateProxy(trimmed)
+        AppLogger.log(
+            getApplication(),
+            if (trimmed.isBlank()) "下载代理已清除（直连）" else "下载代理已设置为: $trimmed",
+            tag = "设置"
+        )
+    }
+
     fun setVideoQuality(quality: Int) {
         _videoQuality.value = quality
         prefs.edit().putInt("video_quality", quality).apply()

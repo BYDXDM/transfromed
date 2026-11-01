@@ -381,6 +381,61 @@ internal fun isAnimatedWebP(header: ByteArray): Boolean {
     return tail.contains("ANIM") || tail.contains("ANMF")
 }
 
+/** JPEG 不支持透明像素：带 alpha 的位图先铺白底再合成，避免透明区域变黑。 */
+internal fun flattenOntoWhite(bitmap: android.graphics.Bitmap): android.graphics.Bitmap {
+    if (!bitmap.hasAlpha()) return bitmap
+    val rgb = android.graphics.Bitmap.createBitmap(
+        bitmap.width, bitmap.height, android.graphics.Bitmap.Config.ARGB_8888
+    )
+    val canvas = android.graphics.Canvas(rgb)
+    canvas.drawColor(android.graphics.Color.WHITE)
+    canvas.drawBitmap(bitmap, 0f, 0f, null)
+    return rgb
+}
+
+/**
+ * 解码图片字节（WebP/无损WebP/动图WebP首帧/PNG 等）。
+ * API 28+ 优先 ImageDecoder：能解动态 WebP 首帧、无损与扩展格式；
+ * 否则回退 BitmapFactory（动态 WebP 在旧系统上会返回 null）。
+ * 超大图按采样率缩读，防止 OOM。
+ */
+internal fun decodeImageBitmap(bytes: ByteArray): android.graphics.Bitmap? {
+    val maxPixels = 40_000_000L // 约 40MP 上限，防止 1 亿像素图直接 OOM
+    if (android.os.Build.VERSION.SDK_INT >= 28) {
+        try {
+            val source = android.graphics.ImageDecoder.createSource(java.nio.ByteBuffer.wrap(bytes))
+            return android.graphics.ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                val pixels = info.size.width.toLong() * info.size.height.toLong()
+                if (pixels > maxPixels) {
+                    var sample = 1
+                    while (pixels / (sample.toLong() * sample.toLong()) > maxPixels) sample++
+                    decoder.setTargetSampleSize(sample)
+                }
+                // JPEG 压缩与白底合成需要可读取的软件位图
+                decoder.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        } catch (e: Exception) {
+            // ImageDecoder 拒绝的文件继续走 BitmapFactory 尝试
+        }
+    }
+
+    return try {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+            val pixels = bounds.outWidth.toLong() * bounds.outHeight.toLong()
+            while (pixels / (sample.toLong() * sample.toLong()) > maxPixels) sample++
+        }
+        android.graphics.BitmapFactory.decodeByteArray(
+            bytes, 0, bytes.size,
+            android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+        )
+    } catch (e: Exception) {
+        null
+    }
+}
+
 suspend fun convertWebpToJpg(
     context: Context,
     inputUri: Uri,
@@ -395,7 +450,10 @@ suspend fun convertWebpToJpg(
             onProgress?.invoke(basePct, "$taskLabel: 0%")
 
             val inputStream = context.contentResolver.openInputStream(inputUri)
-                ?: return@withContext false
+                ?: run {
+                    AppLogger.log(context, "WebP 转 JPG 失败: 无法读取输入文件")
+                    return@withContext false
+                }
             val bytes = inputStream.use { it.readBytes() }
 
             if (isAnimatedWebP(bytes)) {
@@ -403,26 +461,36 @@ suspend fun convertWebpToJpg(
                 onProgress?.invoke(basePct, "$taskLabel: 检测到动图，仅保留第一帧")
             }
 
-            val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            val bitmap = decodeImageBitmap(bytes)
 
             if (bitmap == null) {
-                AppLogger.log(context, "WebP 解码失败: 无法解析图片文件")
+                AppLogger.log(context, "WebP 解码失败: 无法解析图片文件（可能已损坏或为不支持的格式）")
                 return@withContext false
             }
 
             onProgress?.invoke(basePct + pctRange * 0.5f, "$taskLabel: 50% (编码中)")
 
             val outputStream = context.contentResolver.openOutputStream(outputUri)
-                ?: return@withContext false
+            if (outputStream == null) {
+                AppLogger.log(context, "WebP 转 JPG 失败: 无法写入输出文件（文件夹授权可能已失效）")
+                bitmap.recycle()
+                return@withContext false
+            }
 
-            bitmap.compress(
+            val flat = flattenOntoWhite(bitmap)
+            val ok = flat.compress(
                 android.graphics.Bitmap.CompressFormat.JPEG,
                 90,
                 outputStream
             )
             outputStream.flush()
             outputStream.close()
+            if (flat !== bitmap) flat.recycle()
             bitmap.recycle()
+            if (!ok) {
+                AppLogger.log(context, "WebP 转 JPG 失败: JPEG 编码写入失败")
+                return@withContext false
+            }
 
             onProgress?.invoke(basePct + pctRange, "$taskLabel: 100%")
             AppLogger.log(context, "WebP 转 JPG 成功")

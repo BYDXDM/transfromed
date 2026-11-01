@@ -32,12 +32,56 @@ data class ParseEndpointConfig(
 )
 
 object NetworkDownloader {
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)  // 大文件下载友好：CDN 偶发停顿不应导致超时
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
+    // 下载代理（可空）：X/YouTube 等媒体 CDN 在部分网络不可直达，可配置
+    // 局域网 HTTP 代理（如电脑上的 Clash 192.168.x.x:7890）转发下载流量
+    @Volatile private var proxyHost: String? = null
+    @Volatile private var proxyPort: Int = -1
+
+    @Volatile
+    private var client = buildClient()
+
+    private fun buildClient(): OkHttpClient {
+        val builder = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)  // 大文件下载友好：CDN 偶发停顿不应导致超时
+            .followRedirects(true)
+            .followSslRedirects(true)
+        val host = proxyHost
+        if (host != null && proxyPort in 1..65535) {
+            builder.proxy(java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress(host, proxyPort)))
+        }
+        return builder.build()
+    }
+
+    /**
+     * 解析用户输入的代理配置。支持 "host:port"、"http://host:port"、
+     * "socks5://host:port"（统一按 HTTP 代理转发）。无效输入返回 null。
+     */
+    internal fun parseProxySpec(spec: String?): Pair<String, Int>? {
+        val cleaned = spec?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        // 剥离 scheme（大小写不敏感），统一按 HTTP 代理转发
+        val lower = cleaned.lowercase()
+        val noScheme = when {
+            lower.startsWith("https://") -> cleaned.substring("https://".length)
+            lower.startsWith("http://") -> cleaned.substring("http://".length)
+            lower.startsWith("socks5://") -> cleaned.substring("socks5://".length)
+            lower.startsWith("socks://") -> cleaned.substring("socks://".length)
+            else -> cleaned
+        }.trimEnd('/')
+        val parts = noScheme.split(":")
+        val host = parts.getOrNull(0)?.trim().orEmpty()
+        val port = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: return null
+        if (host.isBlank() || port !in 1..65535) return null
+        return host to port
+    }
+
+    /** 设置/清除下载代理；spec 为空串或 null 表示直连。 */
+    fun updateProxy(spec: String?) {
+        val parsed = parseProxySpec(spec)
+        proxyHost = parsed?.first
+        proxyPort = parsed?.second ?: -1
+        client = buildClient()
+    }
 
     private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     private const val MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
@@ -972,19 +1016,25 @@ object NetworkDownloader {
                         }
 
                         // 2b. HTML5 Mobile PlayURL API fallback
+                        // 注意：低清晰度兜底应走 x/player/playurl + platform=html5，
+                        // 旧的 x/v2/dm/playurl 是弹幕接口（恒失败）；cid 也必须用本视频
+                        // 的 effectiveCid，否则 URL 里会拼出 cid=null
                         if (mediaUrl.isNullOrEmpty()) {
                             val h5Req = Request.Builder()
-                                .url("https://api.bilibili.com/x/v2/dm/playurl?bvid=$bvid&cid=$cid&qn=64&platform=html5")
+                                .url("https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$effectiveCid&qn=16&platform=html5")
                                 .header("User-Agent", MOBILE_USER_AGENT)
                                 .header("Referer", "https://m.bilibili.com/")
                                 .build()
                             client.newCall(h5Req).execute().use { h5Res ->
                                 val h5Json = JSONObject(h5Res.body?.string() ?: "")
                                 if (h5Json.optInt("code") == 0) {
-                                    val durlArray = h5Json.optJSONObject("data")?.optJSONObject("durl")?.optJSONArray("url")
+                                    val durlArray = h5Json.optJSONObject("data")?.optJSONArray("durl")
                                     if (durlArray != null && durlArray.length() > 0) {
-                                        mediaUrl = durlArray.getString(0)
-                                        AppLogger.log(context, "【B站-方案2】通过移动端 HTML5 PlayURL 成功抓取")
+                                        val url = durlArray.optJSONObject(0)?.optString("url").orEmpty()
+                                        if (url.startsWith("http")) {
+                                            mediaUrl = url
+                                            AppLogger.log(context, "【B站-方案2】通过移动端 HTML5 PlayURL 成功抓取")
+                                        }
                                     }
                                 }
                             }
@@ -1513,6 +1563,17 @@ object NetworkDownloader {
             .header("Connection", "keep-alive")
             .build()
 
+        // 输出流获取失败（目录授权失效/文件被删）必须显式失败，
+        // 否则会空转下载后报"下载成功"
+        fun openOutput(): OutputStream? {
+            val out = context.contentResolver.openOutputStream(outputUri)
+            if (out == null) {
+                AppLogger.w(context, "无法打开输出文件（文件夹授权可能已失效）", "视频解析")
+                onProgress?.invoke(0f, "错误: 无法写入输出文件，请在主界面重新选择下载文件夹")
+            }
+            return out
+        }
+
         return try {
             client.newCall(downloadReq).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -1549,7 +1610,7 @@ object NetworkDownloader {
                     // 场景：直链本身就是真 MP3 文件，直接落盘保存原始字节，
                     // 不再经过 MediaExtractor+MediaMuxer 重封装（MP3 轨道并非所有设备都支持封装进 MP4）。
                     AppLogger.log(context, "检测到 audio/mpeg 直链，直接保存原始 MP3")
-                    context.contentResolver.openOutputStream(outputUri)?.use { out ->
+                    val written = openOutput()?.use { out ->
                         body.byteStream().use { input ->
                             copyStreamWithProgress(
                                 input = input,
@@ -1562,6 +1623,7 @@ object NetworkDownloader {
                             )
                         }
                     }
+                    if (written == null) return false
                     onProgress?.invoke(1.0f, "MP3 保存完成 (100%)")
                     return true
                 }
@@ -1644,7 +1706,7 @@ object NetworkDownloader {
                         } else {
                             AppLogger.log(context, "M4A 封装失败，尝试直接保存原始流...")
                             // fallback: 直接保存原始流
-                            context.contentResolver.openOutputStream(outputUri)?.use { out ->
+                            val written = openOutput()?.use { out ->
                                 tempFile.inputStream().use { input ->
                                     copyStreamWithProgress(
                                         input = input,
@@ -1657,6 +1719,7 @@ object NetworkDownloader {
                                     )
                                 }
                             }
+                            if (written == null) return false
                             onProgress?.invoke(1.0f, "原始音频已直接保存 (100%)")
                             AppLogger.log(context, "已直接保存原始音频流（可能部分播放器不兼容）")
                             true
@@ -1665,7 +1728,7 @@ object NetworkDownloader {
                         tempFile.delete()
                     }
                 } else {
-                    context.contentResolver.openOutputStream(outputUri)?.use { out ->
+                    val written = openOutput()?.use { out ->
                         body.byteStream().use { input ->
                             copyStreamWithProgress(
                                 input = input,
@@ -1678,11 +1741,18 @@ object NetworkDownloader {
                             )
                         }
                     }
+                    if (written == null) return false
                     onProgress?.invoke(1.0f, "文件下载保存成功 (100%)")
                     AppLogger.log(context, "文件已成功写入保存路径!")
                     true
                 }
             }
+        } catch (e: java.io.IOException) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            // 连接层失败（DNS/超时/被墙/代理拒绝）单独给出可行动提示
+            AppLogger.w(context, "媒体下载连接/写入失败: ${e.message}", "视频解析")
+            onProgress?.invoke(0f, "错误: 无法连接媒体服务器（网络受限或资源被屏蔽，可在个性化设置中配置下载代理）")
+            false
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             AppLogger.log(context, "网络数据传输或写盘时抛出异常: ${e.message}")

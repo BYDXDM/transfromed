@@ -12,8 +12,8 @@ android {
     applicationId = "com.aistudio.converter.ebabcd"
     minSdk = 24
     targetSdk = 36
-    versionCode = 5
-    versionName = "1.4"
+    versionCode = 6
+    versionName = "1.4.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -44,6 +44,8 @@ android {
     }
     debug {
       isDebuggable = true
+      // 调试包使用独立包名，安装验证时不覆盖已发布的正式版
+      applicationIdSuffix = ".debug"
       signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
@@ -79,6 +81,8 @@ dependencies {
   implementation(libs.okhttp)
   implementation("androidx.documentfile:documentfile:1.0.1")
   testImplementation("org.mockito:mockito-core:5.14.2")
+  // 纯 JVM 单测使用真实 org.json（Android SDK 的 org.json 是运行时桩，JVM 上会抛 not-mocked）
+  testImplementation("org.json:json:20240303")
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

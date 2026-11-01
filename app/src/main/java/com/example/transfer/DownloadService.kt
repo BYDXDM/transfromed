@@ -19,6 +19,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.example.data.AppDatabase
 import com.example.data.ConversionHistory
 import com.example.data.ConversionRepository
+import com.example.utils.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -102,10 +103,18 @@ class DownloadService : Service() {
 
     private suspend fun processDownload(task: DownloadTask): Boolean {
         val docDir = DocumentFile.fromTreeUri(this, Uri.parse(task.folderUri))
+        // 目录授权失效（重启/换机后常见）时提前失败并给出可行动的提示，
+        // 而不是卡在重试后报含糊的"下载失败"
+        if (docDir == null || !docDir.canWrite()) {
+            TransferHub.updateTaskMessage(task.id, "下载文件夹不可用或授权已失效，请在主界面重新选择下载文件夹")
+            AppLogger.w(this, "下载目录不可写: ${task.folderUri}", "下载队列")
+            return false
+        }
         val mimeType = if (task.isAudio) "audio/mp4" else "video/mp4"
-        val docFile = docDir?.createFile(mimeType, task.fileName)
+        val docFile = docDir.createFile(mimeType, task.fileName)
         if (docFile == null) {
-            TransferHub.updateTaskMessage(task.id, "无法创建文件")
+            TransferHub.updateTaskMessage(task.id, "无法在所选文件夹创建文件，请更换下载文件夹后重试")
+            AppLogger.w(this, "创建下载文件失败: ${task.fileName}", "下载队列")
             return false
         }
         val onProgress: (Float, String) -> Unit = { pct, status ->
@@ -123,6 +132,9 @@ class DownloadService : Service() {
         )
         if (success) {
             TransferHub.updateTaskOutput(task.id, docFile.uri.toString())
+        } else {
+            // 下载失败时清掉预创建的 0 字节占位文件，避免目录里留下垃圾
+            try { docFile.delete() } catch (e: Exception) { }
         }
         repository.insert(
             ConversionHistory(
@@ -143,6 +155,21 @@ class DownloadService : Service() {
 
     private suspend fun processConversion(job: ConversionJob) {
         val docDir = DocumentFile.fromTreeUri(this, Uri.parse(job.treeUri))
+        // 目录授权失效时整批都无法落盘：直接给出明确原因并记录历史，
+        // 避免用户只看到"有文件失败"却查不到任何记录
+        if (docDir == null || !docDir.canWrite()) {
+            AppLogger.w(this, "批量${job.label}输出目录不可写: ${job.treeUri}", "格式转换")
+            repository.insert(
+                ConversionHistory(
+                    fileName = "(批量${job.label})",
+                    conversionType = job.label,
+                    isSuccess = false,
+                    outputUri = null
+                )
+            )
+            Toast.makeText(this, "输出文件夹不可用或授权已失效，请重新选择输出目录后重试", Toast.LENGTH_LONG).show()
+            return
+        }
         val total = job.uris.size
         var hasError = false
         job.uris.forEachIndexed { index, inputUri ->
@@ -153,7 +180,7 @@ class DownloadService : Service() {
                 "mp4" -> "audio/mp4" to "$baseName.m4a"
                 else -> "image/jpeg" to "$baseName.jpg"
             }
-            val docFile = docDir?.createFile(mime, outName)
+            val docFile = docDir.createFile(mime, outName)
             val fileBasePct = index.toFloat() / total
             val filePctRange = 1f / total
             TransferHub.setActive(
@@ -167,6 +194,15 @@ class DownloadService : Service() {
             )
             if (docFile == null) {
                 hasError = true
+                // 创建文件失败也必须留痕，否则用户无从排查
+                repository.insert(
+                    ConversionHistory(
+                        fileName = fileName,
+                        conversionType = job.label,
+                        isSuccess = false,
+                        outputUri = null
+                    )
+                )
                 return@forEachIndexed
             }
             val onProgress: (Float, String) -> Unit = { pct, status ->
@@ -195,6 +231,10 @@ class DownloadService : Service() {
                         basePct = fileBasePct, pctRange = filePctRange, taskLabel = "WebP转JPG"
                     )
                 }
+            }
+            if (!success) {
+                // 转换失败时清掉预创建的 0 字节占位输出文件
+                try { docFile.delete() } catch (e: Exception) { }
             }
             repository.insert(
                 ConversionHistory(

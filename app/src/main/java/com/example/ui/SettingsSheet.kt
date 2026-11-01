@@ -57,6 +57,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import com.example.NetworkDownloader
 import com.example.R
 import com.example.viewmodel.AppIconType
 import com.example.viewmodel.BackgroundType
@@ -497,6 +498,51 @@ fun AppearanceSettingsSheet(
                     viewModel.setBiliSessdata(sessdataInput.trim())
                     Toast.makeText(context, "SESSDATA 已保存（留空则按未登录画质下载）", Toast.LENGTH_SHORT).show()
                 }) {
+                    Text("保存")
+                }
+            }
+
+            // ===== 下载代理（X/YouTube 等被墙资源）=====
+            val downloadProxy by viewModel.downloadProxy.collectAsStateWithLifecycle()
+            var proxyInput by remember(downloadProxy) { mutableStateOf(downloadProxy) }
+            Text("下载代理 (可选)", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "X(Twitter) 与 YouTube 的媒体服务器在部分网络无法直连（B站不受影响）。" +
+                    "让电脑开启代理软件并允许局域网连接，手机连同一 Wi-Fi，填入电脑的局域网地址，如 192.168.1.5:7890。" +
+                    "留空表示直连。仅代理下载流量，不影响其他应用。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = proxyInput,
+                    onValueChange = { proxyInput = it },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("代理地址 host:port") },
+                    placeholder = { Text("留空直连，如 192.168.1.5:7890") },
+                    singleLine = true
+                )
+                TextButton(
+                    onClick = {
+                        val spec = proxyInput.trim()
+                        val valid = spec.isBlank() || NetworkDownloader.parseProxySpec(spec) != null
+                        if (!valid) {
+                            Toast.makeText(context, "代理格式无效，应为 host:port（如 192.168.1.5:7890）", Toast.LENGTH_LONG).show()
+                        } else {
+                            viewModel.setDownloadProxy(spec)
+                            Toast.makeText(
+                                context,
+                                if (spec.isBlank()) "已保存：直连" else "代理已保存: $spec",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    },
+                    enabled = proxyInput.trim() != downloadProxy
+                ) {
                     Text("保存")
                 }
             }

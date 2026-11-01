@@ -9,13 +9,13 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [34]) // SDK 36 沙箱需 Java 21；34 在 Java 17 下可运行
 class ExampleRobolectricTest {
 
   @Test
   fun `read string from context`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val appName = context.getString(R.string.app_name)
-    assertEquals("My Application", appName)
+    assertEquals("transformed", appName)
   }
 }

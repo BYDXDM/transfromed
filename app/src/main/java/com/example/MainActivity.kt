@@ -79,6 +79,7 @@ import com.example.transfer.DownloadService
 import com.example.transfer.DownloadStatus
 import com.example.transfer.TransferHub
 import com.example.transfer.getBatchFileSizeText
+import com.example.transfer.getFileName
 import com.example.transfer.suggestFileName
 import com.example.ui.HistoryItemRow
 import com.example.ui.SectionCardShape
@@ -258,6 +259,12 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
         NetworkDownloader.updateVideoPreferences(videoQuality, biliSessdata)
     }
 
+    // 将下载代理配置同步给下载器
+    val downloadProxy by viewModel.downloadProxy.collectAsStateWithLifecycle()
+    LaunchedEffect(downloadProxy) {
+        NetworkDownloader.updateProxy(downloadProxy)
+    }
+
     LaunchedEffect(Unit) {
         viewModel.syncRetention(context)
     }
@@ -314,8 +321,53 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
         if (uris.isNotEmpty()) mp4Uris = uris
     }
 
+    // 微信/QQ/浏览器保存的 webp 常被标记为 application/octet-stream，
+    // 只放行 image/webp 会导致这些文件在选择器里无法选中（表现为"完全用不了"），
+    // 因此同时放行全部图片与 octet-stream，转换阶段再按扩展名/可解码性校验。
     val webpPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) webpUris = uris
+        if (uris.isNotEmpty()) {
+            val images = uris.filter { uri ->
+                val name = getFileName(context, uri).lowercase()
+                IMAGE_SOURCE_EXTS.any { name.endsWith(it) }
+            }
+            if (images.isEmpty()) {
+                Toast.makeText(context, "未选择图片文件（支持 webp/png/jpg/gif/bmp/tiff）", Toast.LENGTH_LONG).show()
+            }
+            webpUris = images
+        }
+    }
+
+    /** 目录树 URI 是否仍可写（重启/换机后持久授权可能失效）。 */
+    fun folderUsable(uriString: String?): Boolean {
+        if (uriString.isNullOrBlank()) return false
+        return try {
+            val doc = DocumentFile.fromTreeUri(context, Uri.parse(uriString))
+            doc != null && doc.canWrite()
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** 恢复上次的输出目录；失效时清除记忆并提示重新选择。 */
+    fun usableSavedDir(type: String): Uri? {
+        val last = viewModel.getOutputDir(type)
+        if (folderUsable(last)) return Uri.parse(last)
+        if (last != null) {
+            viewModel.clearOutputDir(type)
+            Toast.makeText(context, "上次保存的目录已失效（授权过期），请重新选择输出目录", Toast.LENGTH_LONG).show()
+        }
+        return null
+    }
+
+    fun takePersistable(uri: Uri) {
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (e: Exception) {
+            // 部分提供方不支持持久化授权，忽略（本次会话内仍可写）
+        }
     }
 
     fun startEpubConvert(treeUri: Uri) {
@@ -329,13 +381,14 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     }
 
     val epubSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { startEpubConvert(it) }
+        uri?.let {
+            takePersistable(it)
+            startEpubConvert(it)
+        }
     }
 
     fun startEpubWithMemory() {
-        val last = viewModel.getOutputDir("epub")
-        if (last != null) startEpubConvert(Uri.parse(last))
-        else epubSaver.launch(null)
+        usableSavedDir("epub")?.let(::startEpubConvert) ?: epubSaver.launch(null)
     }
 
     fun startMp4Convert(treeUri: Uri) {
@@ -349,13 +402,14 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     }
 
     val mp4Saver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { startMp4Convert(it) }
+        uri?.let {
+            takePersistable(it)
+            startMp4Convert(it)
+        }
     }
 
     fun startMp4WithMemory() {
-        val last = viewModel.getOutputDir("mp4")
-        if (last != null) startMp4Convert(Uri.parse(last))
-        else mp4Saver.launch(null)
+        usableSavedDir("mp4")?.let(::startMp4Convert) ?: mp4Saver.launch(null)
     }
 
     fun startWebpConvert(treeUri: Uri) {
@@ -369,13 +423,14 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     }
 
     val webpSaver = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { startWebpConvert(it) }
+        uri?.let {
+            takePersistable(it)
+            startWebpConvert(it)
+        }
     }
 
     fun startWebpWithMemory() {
-        val last = viewModel.getOutputDir("webp")
-        if (last != null) startWebpConvert(Uri.parse(last))
-        else webpSaver.launch(null)
+        usableSavedDir("webp")?.let(::startWebpConvert) ?: webpSaver.launch(null)
     }
 
     // ===== 批量下载文件夹选择器 =====
@@ -408,13 +463,17 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
         }
     }
 
-    // 启动时恢复上次选择的下载文件夹
+    // 启动时恢复上次选择的下载文件夹（失效则清除记忆）
     LaunchedEffect(Unit) {
         val savedDir = viewModel.getOutputDir("dlqueue")
         if (savedDir != null) {
-            val uri = Uri.parse(savedDir)
-            queueFolderUri = uri
-            queueFolderName = DocumentFile.fromTreeUri(context, uri)?.name ?: "已选择文件夹"
+            if (folderUsable(savedDir)) {
+                val uri = Uri.parse(savedDir)
+                queueFolderUri = uri
+                queueFolderName = DocumentFile.fromTreeUri(context, uri)?.name ?: "已选择文件夹"
+            } else {
+                viewModel.clearOutputDir("dlqueue")
+            }
         }
     }
 
@@ -424,7 +483,15 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
             videoUrl, ext,
             fileNameTitle(customVideoTitle, fetchedVideoTitle, selectedPage, biliPages)
         )
-        val folder = queueFolderUri
+        var folder = queueFolderUri
+        // 记忆的文件夹可能因重启/换机授权失效：失效则清除并重新选择
+        if (folder != null && !folderUsable(folder.toString())) {
+            viewModel.clearOutputDir("dlqueue")
+            queueFolderUri = null
+            queueFolderName = ""
+            folder = null
+            Toast.makeText(context, "下载文件夹授权已失效，请重新选择", Toast.LENGTH_LONG).show()
+        }
         if (folder == null) {
             // 首次下载：挂起请求，文件夹选好后自动继续
             pendingDownload = PendingDownload(videoUrl, isAudio, selectedPage?.cid, targetName)
@@ -727,7 +794,7 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Button(onClick = { webpPicker.launch(arrayOf("image/webp")) }, enabled = !isConverting) {
+                        Button(onClick = { webpPicker.launch(arrayOf("image/*", "application/octet-stream")) }, enabled = !isConverting) {
                             Text("批量导入 WebP文件")
                         }
                         if (webpUris.isNotEmpty()) {
@@ -1475,6 +1542,9 @@ private fun fileNameTitle(
     val base = customTitle.ifBlank { fetchedTitle } ?: return null
     return if (selectedPage != null && pages.size > 1) "$base P${selectedPage.page}" else base
 }
+
+/** WebP→JPG 卡片接受的源图片扩展名（文件名层面过滤，最终以能否解码为准）。 */
+private val IMAGE_SOURCE_EXTS = setOf(".webp", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif")
 
 /** 首次下载时文件夹未选定，先挂起请求，选完文件夹自动继续。 */
 private data class PendingDownload(
