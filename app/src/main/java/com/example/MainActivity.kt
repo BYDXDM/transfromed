@@ -68,6 +68,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
@@ -78,6 +79,7 @@ import coil.compose.AsyncImage
 import com.example.transfer.DownloadService
 import com.example.transfer.DownloadStatus
 import com.example.transfer.TransferHub
+import com.example.transfer.dateGroupKey
 import com.example.transfer.getBatchFileSizeText
 import com.example.transfer.getFileName
 import com.example.transfer.suggestFileName
@@ -1508,7 +1510,14 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    // 按日期分组：列表已按时间倒序，遇到新日期键就插入一个分组标题行
+                    var lastDateKey: String? = null
                     filteredHistoryList.forEach { history ->
+                        val dateKey = dateGroupKey(history.timestamp)
+                        if (dateKey != lastDateKey) {
+                            lastDateKey = dateKey
+                            HistoryDateHeader(timestamp = history.timestamp)
+                        }
                         HistoryItemRow(
                             history = history,
                             isSelected = selectedHistoryIds.contains(history.id),
@@ -1532,6 +1541,57 @@ fun ConverterApp(modifier: Modifier = Modifier, viewModel: MainViewModel = viewM
     }
 }
 
+/** 历史列表的日期分组标题：今天/昨天显示相对名，其余显示 yyyy年M月d日。 */
+@Composable
+private fun HistoryDateHeader(timestamp: Long) {
+    val label = remember(timestamp) {
+        val zone = java.util.TimeZone.getDefault()
+        val cal = java.util.Calendar.getInstance(zone).apply {
+            timeInMillis = timestamp
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val today = java.util.Calendar.getInstance(zone).apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val dayMillis = 24L * 60 * 60 * 1000
+        when {
+            cal.timeInMillis == today.timeInMillis -> "今天"
+            cal.timeInMillis == today.timeInMillis - dayMillis -> "昨天"
+            else -> {
+                val y = cal.get(java.util.Calendar.YEAR)
+                val m = cal.get(java.util.Calendar.MONTH) + 1
+                val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
+                "${y}年${m}月${d}日"
+            }
+        }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(MaterialTheme.colorScheme.outlineVariant)
+        )
+    }
+}
 /** 组装用于文件命名的标题：多P时自动附加 P 编号。 */
 private fun fileNameTitle(
     customTitle: String,

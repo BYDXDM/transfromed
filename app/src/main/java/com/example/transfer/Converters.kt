@@ -41,6 +41,18 @@ fun formatTimestamp(timestamp: Long): String {
     return sdf.format(Date(timestamp))
 }
 
+/** 短时间格式：仅时分秒（日期由历史列表的日期分组标题承担）。 */
+fun formatTimeShort(timestamp: Long): String {
+    val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    return sdf.format(Date(timestamp))
+}
+
+/** 日期分组标题用的 yyyy-MM-dd 键。 */
+fun dateGroupKey(timestamp: Long): String {
+    val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    return sdf.format(Date(timestamp))
+}
+
 fun getBatchFileSizeText(context: Context, uris: List<Uri>): String {
     if (uris.isEmpty()) return ""
     var totalBytes = 0L

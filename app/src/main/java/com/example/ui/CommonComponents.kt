@@ -38,10 +38,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import android.net.Uri
 import com.example.data.ConversionHistory
-import com.example.transfer.formatTimestamp
+import com.example.transfer.formatTimeShort
 
 /** 统一的功能分区卡片：大圆角 + 图标徽章标题。 */
 val SectionCardShape = RoundedCornerShape(20.dp)
@@ -111,11 +112,13 @@ fun HistoryItemRow(
                 Text(
                     text = history.fileName,
                     style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // 按类型上色的徽章，便于快速区分记录来源
@@ -143,7 +146,7 @@ fun HistoryItemRow(
                         )
                     }
                     Text(
-                        text = formatTimestamp(history.timestamp),
+                        text = formatTimeShort(history.timestamp),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -153,13 +156,13 @@ fun HistoryItemRow(
                 imageVector = if (history.isSuccess) Icons.Default.CheckCircle else Icons.Default.Error,
                 contentDescription = if (history.isSuccess) "成功" else "失败",
                 tint = if (history.isSuccess) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(horizontal = 4.dp).size(20.dp)
+                modifier = Modifier.padding(start = 4.dp).size(18.dp)
             )
             if (history.isSuccess && !history.outputUri.isNullOrEmpty()) {
                 val context = LocalContext.current
                 IconButton(
                     onClick = { openFile(context, history.outputUri, history.conversionType) },
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.OpenInNew,
@@ -179,7 +182,7 @@ fun HistoryItemRow(
                             Toast.makeText(context, "复制路径失败", Toast.LENGTH_SHORT).show()
                         }
                     },
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.ContentCopy,
@@ -190,7 +193,7 @@ fun HistoryItemRow(
                 }
                 IconButton(
                     onClick = { shareFile(context, history.outputUri) },
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Share,
@@ -202,7 +205,7 @@ fun HistoryItemRow(
             }
             IconButton(
                 onClick = onDeleteSingle,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(28.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.DeleteOutline,
