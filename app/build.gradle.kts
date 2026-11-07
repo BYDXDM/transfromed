@@ -40,7 +40,8 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      // 与历史发布一致：正式包也用 debug.keystore 签名（手机上 v1.4 就是这个签名，可覆盖升级）
+      signingConfig = signingConfigs.getByName("debugConfig")
     }
     debug {
       isDebuggable = true
