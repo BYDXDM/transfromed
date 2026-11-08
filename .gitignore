@@ -17,3 +17,8 @@ local.properties
 .env
 debug.keystore
 .mimosa/
+
+# 签名材料只留本地(2026-11-08 轮换,历史提交中仍含旧 debug.keystore)
+keystore.properties
+my-upload-key.jks
+debug.keystore

@@ -1,8 +1,17 @@
+import java.util.Properties
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
 }
+
+// 正式签名从根目录 keystore.properties 读取（只留本地，不入库）；缺失时 release 回退 debug 签名
+val keystoreProps = Properties().apply {
+  val f = rootProject.file("keystore.properties")
+  if (f.exists()) f.inputStream().use { load(it) }
+}
+val hasReleaseKeystore = keystoreProps.isNotEmpty()
 
 android {
   namespace = "com.example"
@@ -12,19 +21,26 @@ android {
     applicationId = "com.aistudio.converter.ebabcd"
     minSdk = 24
     targetSdk = 36
-    versionCode = 6
-    versionName = "1.4.1"
+    versionCode = 7
+    versionName = "1.5.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      if (hasReleaseKeystore) {
+        storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+        storePassword = keystoreProps.getProperty("storePassword")
+        keyAlias = keystoreProps.getProperty("keyAlias")
+        keyPassword = keystoreProps.getProperty("keyPassword")
+      } else {
+        // 无正式签名时占位（不会被 release 使用，见下方回退）
+        storeFile = file("${rootDir}/debug.keystore")
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
@@ -40,8 +56,10 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      // 与历史发布一致：正式包也用 debug.keystore 签名（手机上 v1.4 就是这个签名，可覆盖升级）
-      signingConfig = signingConfigs.getByName("debugConfig")
+      // 2026-11-08 签名轮换：有本地 keystore.properties 时用正式 upload key（v1.5.0 起，需卸载重装）；
+      // 否则（如 CI 环境）回退 debug 签名，仅供测试构建
+      signingConfig = if (hasReleaseKeystore) signingConfigs.getByName("release")
+                      else signingConfigs.getByName("debugConfig")
     }
     debug {
       isDebuggable = true

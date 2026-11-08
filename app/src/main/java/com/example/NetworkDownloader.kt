@@ -11,6 +11,9 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.Interceptor
+import okhttp3.Response
+import okhttp3.Dns
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import com.example.transfer.convertMp4ToAudio
 import org.json.JSONArray
@@ -44,13 +47,92 @@ object NetworkDownloader {
         val builder = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)  // 大文件下载友好：CDN 偶发停顿不应导致超时
-            .followRedirects(true)
-            .followSslRedirects(true)
+            // P0 安全修复：关闭 OkHttp 自动重定向——自动跟随的目标从未经过 isPublicHttpUrl
+            // 门禁，存在"302 → 内网地址"的 SSRF 绕过。改由 RedirectGuardInterceptor 手动
+            // 逐跳跟随，每一跳 Location 都重新走同一套 SSRF 校验，最多跟随 MAX_REDIRECT_FOLLOW 次。
+            .followRedirects(false)
+            .followSslRedirects(false)
+            // DNS 钉扎：连接使用的解析结果与 isPublicAddress 校验共用同一份，
+            // 封死"校验时解析到公网、连接时再解析被劫持到内网"的 DNS rebinding。
+            .dns(PublicDnsOnly())
+            .addInterceptor(RedirectGuardInterceptor())
         val host = proxyHost
         if (host != null && proxyPort in 1..65535) {
             builder.proxy(java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress(host, proxyPort)))
         }
         return builder.build()
+    }
+
+    /** 手动重定向跟随次数上限：防止无限重定向循环拖死下载线程。 */
+    private const val MAX_REDIRECT_FOLLOW = 5
+
+    /** 与 OkHttp 自动重定向语义一致的 3xx 状态码集合。 */
+    private val REDIRECT_STATUSES = setOf(301, 302, 303, 307, 308)
+
+    /** 重定向目标未通过 SSRF 校验（非公网 http/https）时抛出，调用层据此给出"链接不安全"提示。 */
+    private class UnsafeRedirectException(message: String) : java.io.IOException(message)
+
+    /**
+     * 手动重定向跟随拦截器（SSRF 修复核心）：
+     * 每个被允许的 3xx 响应取出 Location，经 HttpUrl.resolve 归一化为绝对地址后
+     * 重新走 isPublicHttpUrl 门禁（scheme / 内网主机名 / DNS 解析逐 IP 校验），通过才发起下一跳；
+     * 校验失败、Location 缺失或跳数超过 MAX_REDIRECT_FOLLOW 一律中止并抛 IOException。
+     * 301/302/303 的 POST 降级为 GET（与 OkHttp 自动跟随语义一致）；307/308 保留原方法与请求体；
+     * 跨主机跳转时丢弃 Cookie/Authorization 头，防止 SESSDATA 等凭证随跳转外泄。
+     */
+    private class RedirectGuardInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            var request = chain.request()
+            var hops = 0
+            var response = chain.proceed(request)
+            while (response.code in REDIRECT_STATUSES) {
+                val code = response.code
+                val location = response.header("Location")
+                val requestUrl = request.url
+                response.close() // 3xx 响应体无需读取，关闭后再发下一跳，避免连接泄漏
+                if (hops >= MAX_REDIRECT_FOLLOW) {
+                    throw java.io.IOException("重定向次数超过上限($MAX_REDIRECT_FOLLOW)，已中止请求")
+                }
+                if (location.isNullOrBlank()) {
+                    throw java.io.IOException("HTTP $code 重定向缺少 Location 头，已中止请求")
+                }
+                val nextUrl = requestUrl.resolve(location)
+                    ?: throw java.io.IOException("重定向 Location 无法解析为合法地址: $location")
+                if (!isPublicHttpUrl(nextUrl.toString())) {
+                    throw UnsafeRedirectException("重定向目标未通过公网安全校验: $nextUrl")
+                }
+                val method = when {
+                    code == 307 || code == 308 -> request.method
+                    request.method == "POST" -> "GET"
+                    else -> request.method
+                }
+                val body = if (method == request.method) request.body else null
+                val nextRequestBuilder = request.newBuilder().url(nextUrl)
+                if (requestUrl.host != nextUrl.host) {
+                    nextRequestBuilder.removeHeader("Cookie").removeHeader("Authorization")
+                }
+                request = nextRequestBuilder.method(method, body).build()
+                hops++
+                response = chain.proceed(request)
+            }
+            return response
+        }
+    }
+
+    /**
+     * DNS 钉扎解析（防 rebinding）：所有直连请求的域名解析结果逐 IP 过 isPublicAddress
+     * 校验（与 isPublicHttpUrl 同一套 IP 判定），只把公网 IP 交给连接层——校验与连接共用
+     * 同一份解析结果，杜绝"校验时公网、连接时内网"。解析不出公网 IP 直接抛 UnknownHostException。
+     * 注：配置了下载代理时目标域名由代理侧解析，不经过本类；代理地址本身由用户显式配置。
+     */
+    private class PublicDnsOnly : Dns {
+        override fun lookup(hostname: String): List<java.net.InetAddress> {
+            val safe = java.net.InetAddress.getAllByName(hostname).filter { isPublicAddress(it) }
+            if (safe.isEmpty()) {
+                throw java.net.UnknownHostException("主机 $hostname 未解析到公网地址，拒绝连接")
+            }
+            return safe
+        }
     }
 
     /**
@@ -205,33 +287,40 @@ object NetworkDownloader {
         return try {
             val addresses = java.net.InetAddress.getAllByName(host)
             if (addresses.isEmpty()) return false
-            addresses.all { addr ->
-                val isPrivateV4 = run {
-                    val b = addr.address
-                    b.size == 4 && (
-                        b[0] == 0.toByte() ||                       // 0.0.0.0/8 "this network"
-                        b[0] == 10.toByte() ||                      // 10.0.0.0/8
-                        (b[0] == 100.toByte() && b[1] in 64..127) ||// 100.64.0.0/10 CGNAT
-                        (b[0] == 127.toByte()) ||                   // 127.0.0.0/8
-                        (b[0] == 169.toByte() && b[1] == 254.toByte()) || // 169.254.0.0/16
-                        (b[0] == 172.toByte() && b[1] in 16..31) || // 172.16.0.0/12
-                        (b[0] == 192.toByte() && b[1] == 168.toByte())    // 192.168.0.0/16
-                        )
-                }
-                val isUlaV6 = addr.address.size == 16 &&
-                        ((addr.address[0].toInt() and 0xFF) in 0xFC..0xFD) // fc00::/7 ULA
-                !addr.isLoopbackAddress &&
-                        !addr.isSiteLocalAddress &&
-                        !addr.isLinkLocalAddress &&
-                        !addr.isAnyLocalAddress &&
-                        !addr.isMulticastAddress &&
-                        !isPrivateV4 &&
-                        !isUlaV6
-            }
+            addresses.all { isPublicAddress(it) }
         } catch (e: Exception) {
             // 无法解析的 host 一律拒绝，宁可误杀不可放行内网
             false
         }
+    }
+
+    /**
+     * 单个 IP 的公网判定：排除环回/私有/链路本地/保留/组播地址（0.0.0.0/8、10/8、
+     * 100.64/10 CGNAT、127/8、169.254/16、172.16/12、192.168/16、fc00::/7 ULA）。
+     * isPublicHttpUrl 与 PublicDnsOnly（DNS 钉扎）共用同一套判定，避免两处逻辑漂移。
+     */
+    internal fun isPublicAddress(addr: java.net.InetAddress): Boolean {
+        val isPrivateV4 = run {
+            val b = addr.address
+            b.size == 4 && (
+                b[0] == 0.toByte() ||                       // 0.0.0.0/8 "this network"
+                b[0] == 10.toByte() ||                      // 10.0.0.0/8
+                (b[0] == 100.toByte() && b[1] in 64..127) ||// 100.64.0.0/10 CGNAT
+                (b[0] == 127.toByte()) ||                   // 127.0.0.0/8
+                (b[0] == 169.toByte() && b[1] == 254.toByte()) || // 169.254.0.0/16
+                (b[0] == 172.toByte() && b[1] in 16..31) || // 172.16.0.0/12
+                (b[0] == 192.toByte() && b[1] == 168.toByte())    // 192.168.0.0/16
+                )
+        }
+        val isUlaV6 = addr.address.size == 16 &&
+                ((addr.address[0].toInt() and 0xFF) in 0xFC..0xFD) // fc00::/7 ULA
+        return !addr.isLoopbackAddress &&
+                !addr.isSiteLocalAddress &&
+                !addr.isLinkLocalAddress &&
+                !addr.isAnyLocalAddress &&
+                !addr.isMulticastAddress &&
+                !isPrivateV4 &&
+                !isUlaV6
     }
 
     fun sanitizeUrlInput(rawInput: String): String {
@@ -276,6 +365,22 @@ object NetworkDownloader {
         }
 
         return cleaned
+    }
+
+    /**
+     * B站链接路由判定：域名命中（bilibili.com / b23.tv 及其子域），
+     * 或包含独立的 BV 号 / av 号（词边界正则，前后不能是字母数字）。
+     * 替代旧的 contains("av") 子串匹配，避免 .avi / have / caravan 等直链
+     * 被误送进 B站解析链路导致直链下载与标题抓取失效。
+     */
+    internal fun isBilibiliUrl(url: String): Boolean {
+        val host = url.toHttpUrlOrNull()?.host?.lowercase()
+        if (host != null &&
+            (host == "bilibili.com" || host.endsWith(".bilibili.com") ||
+                host == "b23.tv" || host.endsWith(".b23.tv"))
+        ) return true
+        return url.contains(Regex("""BV[a-zA-Z0-9]{10}""")) ||
+                url.contains(Regex("""(?<![a-zA-Z0-9])av\d+""", RegexOption.IGNORE_CASE))
     }
 
     fun extractYouTubeVideoId(url: String): String? {
@@ -409,7 +514,7 @@ object NetworkDownloader {
                 }
 
                 // 2. Bilibili Title
-                if (cleanUrl.contains("bilibili.com") || cleanUrl.contains("b23.tv") || cleanUrl.contains("BV") || cleanUrl.contains("av")) {
+                if (isBilibiliUrl(cleanUrl)) {
                     val resolved = resolveFinalUrl(cleanUrl)
                     val bvid = extractBvid(context, resolved)
                     if (bvid != null) {
@@ -727,7 +832,7 @@ object NetworkDownloader {
                     return@withContext false
                 }
 
-                if (inputUrl.contains("bilibili.com") || inputUrl.contains("b23.tv") || inputUrl.contains("BV") || inputUrl.contains("av")) {
+                if (isBilibiliUrl(inputUrl)) {
                     return@withContext downloadBilibiliMultiSource(context, inputUrl, outputUri, isMp3, onProgress, cid)
                 } else if (inputUrl.contains("twitter.com") || inputUrl.contains("x.com")) {
                     return@withContext downloadTwitterMultiSource(context, inputUrl, outputUri, isMp3, onProgress)
@@ -1747,6 +1852,11 @@ object NetworkDownloader {
                     true
                 }
             }
+        } catch (e: UnsafeRedirectException) {
+            // 重定向链中出现内网/非公网目标：先于通用 IOException 捕获，给出与初始门禁一致的安全提示
+            AppLogger.w(context, "重定向目标未通过安全校验，已中止下载: ${e.message}", "视频解析")
+            onProgress?.invoke(0f, "错误: 重定向目标不安全，已拒绝下载")
+            false
         } catch (e: java.io.IOException) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             // 连接层失败（DNS/超时/被墙/代理拒绝）单独给出可行动提示
