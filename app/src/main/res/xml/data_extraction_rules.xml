@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
+   Android 12+（API 31+）云备份与设备迁移规则。
+   排除所有可能含登录凭证/授权 URI 的 prefs，确保备份与迁移不外泄：
+   - app_bg_prefs.xml：历史版本曾明文存 SESSDATA（升级后由应用迁移并删除），另含输出目录授权 URI
+   - bili_secure_prefs.xml：EncryptedSharedPreferences 加密凭证；主密钥在 Android Keystore
+     不可迁移，还原到其他设备也无法解密，排除可避免还原后解密失败
    See https://developer.android.com/about/versions/12/backup-restore#xml-changes
    for details.
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="sharedpref" path="app_bg_prefs.xml" />
+        <exclude domain="sharedpref" path="bili_secure_prefs.xml" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="sharedpref" path="app_bg_prefs.xml" />
+        <exclude domain="sharedpref" path="bili_secure_prefs.xml" />
     </device-transfer>
-    -->
 </data-extraction-rules>

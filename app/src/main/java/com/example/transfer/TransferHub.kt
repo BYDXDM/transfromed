@@ -6,6 +6,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import org.json.JSONArray
 import org.json.JSONObject
@@ -106,11 +107,6 @@ object TransferHub {
         cid: Long? = null
     ): Boolean {
         if (folderUri.isBlank()) return false
-        val duplicate = _tasks.value.any {
-            it.url == url && it.isAudio == isAudio &&
-                    (it.status == DownloadStatus.WAITING || it.status == DownloadStatus.RUNNING)
-        }
-        if (duplicate) return false
         val task = DownloadTask(
             id = taskIdCounter.incrementAndGet(),
             url = url,
@@ -119,7 +115,20 @@ object TransferHub {
             folderUri = folderUri,
             cid = cid
         )
-        _tasks.value = _tasks.value + task
+        // 去重判断与追加放进同一个 CAS 原子段（update），
+        // 避免与下载进度的并发更新交错导致任务被覆盖丢失
+        var enqueued = false
+        _tasks.update { current ->
+            val duplicate = current.any {
+                it.url == url && it.isAudio == isAudio &&
+                        (it.status == DownloadStatus.WAITING || it.status == DownloadStatus.RUNNING)
+            }
+            if (duplicate) current else {
+                enqueued = true
+                current + task
+            }
+        }
+        if (!enqueued) return false
         persistTasks()
         return true
     }
@@ -135,35 +144,39 @@ object TransferHub {
 
     /** 删除单个任务（下载中的任务不可删）。 */
     fun removeTask(id: Long) {
-        _tasks.value = _tasks.value.filter {
-            !(it.id == id && it.status != DownloadStatus.RUNNING)
+        _tasks.update { current ->
+            current.filter { !(it.id == id && it.status != DownloadStatus.RUNNING) }
         }
         persistTasks()
     }
 
     /** 清空队列中未在运行的任务。 */
     fun clearFinishedQueue() {
-        _tasks.value = _tasks.value.filter { it.status == DownloadStatus.RUNNING }
+        _tasks.update { current ->
+            current.filter { it.status == DownloadStatus.RUNNING }
+        }
         persistTasks()
     }
 
     /** 入队批量转换；入参无效时返回 false。 */
     fun enqueueConversion(type: String, label: String, uris: List<Uri>, treeUri: String): Boolean {
         if (uris.isEmpty() || treeUri.isBlank()) return false
-        _conversionJobs.value = _conversionJobs.value + ConversionJob(
+        val job = ConversionJob(
             id = conversionIdCounter.incrementAndGet(),
             type = type,
             label = label,
             uris = uris,
             treeUri = treeUri
         )
+        _conversionJobs.update { current -> current + job }
         return true
     }
 
     // ---------------- 服务入口 ----------------
 
     internal fun updateTask(id: Long, transform: (DownloadTask) -> DownloadTask) {
-        _tasks.value = _tasks.value.map { if (it.id == id) transform(it) else it }
+        // CAS 原子读改写：transform 须为纯函数（CAS 失败重试时会再次调用）
+        _tasks.update { current -> current.map { if (it.id == id) transform(it) else it } }
     }
 
     internal fun updateTaskProgress(id: Long, progress: Float, message: String) {
@@ -194,10 +207,12 @@ object TransferHub {
     }
 
     internal fun failRunningTasks(message: String) {
-        _tasks.value = _tasks.value.map {
-            if (it.status == DownloadStatus.RUNNING) {
-                it.copy(status = DownloadStatus.FAILED, message = message)
-            } else it
+        _tasks.update { current ->
+            current.map {
+                if (it.status == DownloadStatus.RUNNING) {
+                    it.copy(status = DownloadStatus.FAILED, message = message)
+                } else it
+            }
         }
         persistTasks()
     }
@@ -214,7 +229,8 @@ object TransferHub {
             while (currentCoroutineContext().isActive) {
                 val job = _conversionJobs.value.firstOrNull()
                 if (job != null) {
-                    _conversionJobs.value = _conversionJobs.value.filterNot { it.id == job.id }
+                    // CAS 原子出队：避免与 UI 入队并发时新任务被覆盖丢失
+                    _conversionJobs.update { current -> current.filterNot { j -> j.id == job.id } }
                     _activeTask.value = ActiveTask("批量转换 ${job.label}", 0f, "准备中...")
                     try {
                         processConversion(job)

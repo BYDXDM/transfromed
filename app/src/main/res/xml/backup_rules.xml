@@ -1,13 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
+   Android 11 及以下（API <31）Auto Backup 规则（fullBackupContent）。
+   与 data_extraction_rules.xml 保持一致：排除含凭证/授权 URI 的 prefs，
+   确保云备份不含登录凭证。
    See https://developer.android.com/guide/topics/data/autobackup
    for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="sharedpref" path="app_bg_prefs.xml" />
+    <exclude domain="sharedpref" path="bili_secure_prefs.xml" />
 </full-backup-content>

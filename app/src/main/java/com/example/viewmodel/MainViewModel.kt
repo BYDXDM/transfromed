@@ -3,8 +3,11 @@ package com.example.viewmodel
 import android.app.Application
 import android.content.ComponentName
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import androidx.lifecycle.AndroidViewModel
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import androidx.lifecycle.viewModelScope
 import com.example.NetworkDownloader
 import com.example.ParseEndpointConfig
@@ -53,6 +56,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences("app_bg_prefs", Context.MODE_PRIVATE)
 
+    // ===== 登录凭证专用加密存储（EncryptedSharedPreferences，主密钥存 Android Keystore，
+    //       不可随云备份迁移；该文件已被备份规则排除，见 res/xml/backup_rules.xml 与 data_extraction_rules.xml）=====
+    private val securePrefs: SharedPreferences by lazy {
+        try {
+            createSecurePrefs()
+        } catch (e: Exception) {
+            // 密钥环损坏（如系统还原/备份恢复后 Keystore 密钥不匹配）时重建：
+            // 凭证丢失优于持续崩溃
+            getApplication<Application>().deleteSharedPreferences(SECURE_PREFS_FILE)
+            createSecurePrefs()
+        }
+    }
+
+    private fun createSecurePrefs(): SharedPreferences {
+        val masterKey = MasterKey.Builder(getApplication())
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        return EncryptedSharedPreferences.create(
+            getApplication(),
+            SECURE_PREFS_FILE,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
     private val _bgSettings = MutableStateFlow(loadBackgroundSettings())
     val bgSettings: StateFlow<BackgroundSettings> = _bgSettings.asStateFlow()
 
@@ -70,7 +99,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _videoQuality = MutableStateFlow(prefs.getInt("video_quality", 64))
     val videoQuality: StateFlow<Int> = _videoQuality.asStateFlow()
 
-    private val _biliSessdata = MutableStateFlow(prefs.getString("bili_sessdata", "") ?: "")
+    private val _biliSessdata = MutableStateFlow(loadBiliSessdata())
     val biliSessdata: StateFlow<String> = _biliSessdata.asStateFlow()
 
     // ===== 下载代理（X/YouTube 等被墙资源经局域网代理转发）=====
@@ -96,8 +125,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setBiliSessdata(sessdata: String) {
         _biliSessdata.value = sessdata
-        prefs.edit().putString("bili_sessdata", sessdata).apply()
+        if (sessdata.isBlank()) {
+            securePrefs.edit().remove(KEY_SESSDATA).apply()
+        } else {
+            securePrefs.edit().putString(KEY_SESSDATA, sessdata).apply()
+        }
+        // 清理历史版本遗留的明文凭证
+        prefs.edit().remove(KEY_SESSDATA).apply()
         AppLogger.log(getApplication(), "B站 SESSDATA 已${if (sessdata.isBlank()) "清空（未登录画质）" else "更新（高画质）"}", tag = "设置")
+    }
+
+    /** SESSDATA 只存加密 prefs；旧版本明文残留一次性迁移（转加密并删除明文键）。 */
+    private fun loadBiliSessdata(): String {
+        val legacy = prefs.getString(KEY_SESSDATA, null)
+        if (!legacy.isNullOrEmpty()) {
+            securePrefs.edit().putString(KEY_SESSDATA, legacy).apply()
+            prefs.edit().remove(KEY_SESSDATA).apply()
+            return legacy
+        }
+        return securePrefs.getString(KEY_SESSDATA, "") ?: ""
     }
 
     init {
@@ -364,5 +410,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.deleteBatch(ids)
         }
+    }
+
+    companion object {
+        /** 加密 prefs 文件名（不随云备份/设备迁移，见 res/xml 备份排除规则）。 */
+        private const val SECURE_PREFS_FILE = "bili_secure_prefs"
+        /** SESSDATA 键名（旧版在 app_bg_prefs 明文，现已迁入加密 prefs，键名保持一致）。 */
+        private const val KEY_SESSDATA = "bili_sessdata"
     }
 }
